@@ -1,11 +1,7 @@
 package eu.kanade.tachiyomi.extension.es.ikigaimangas
 
-import android.content.SharedPreferences
-import androidx.preference.PreferenceScreen
-import androidx.preference.SwitchPreferenceCompat
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.awaitSuccess
-import eu.kanade.tachiyomi.source.ConfigurableSource
 import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
@@ -15,15 +11,10 @@ import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
 import keiyoushi.network.get
-import keiyoushi.network.post
 import keiyoushi.network.rateLimit
 import keiyoushi.source.KeiSource
 import keiyoushi.utils.asJsoup
-import keiyoushi.utils.getPreferences
-import keiyoushi.utils.parseAs
-import keiyoushi.utils.runWebView
 import keiyoushi.utils.tryParseDate
-import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -35,28 +26,31 @@ import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import org.jsoup.nodes.Element
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 import kotlin.time.Duration.Companion.seconds
 
+// Versión iOS/Tachimanga: sin ConfigurableSource ni SharedPreferences (rompen el
+// verificador J9), y sin búsqueda por texto (el sitio la hace por RPC de Qwik
+// que requiere ejecutar JavaScript/WebView).
 @Source
-abstract class IkigaiMangas :
-    KeiSource(),
-    ConfigurableSource {
+abstract class IkigaiMangas : KeiSource() {
 
     override fun OkHttpClient.Builder.configureClient(): OkHttpClient.Builder = addNetworkInterceptor(::nsfwCookieInterceptor)
         .rateLimit(1, 2.seconds) { it.host == baseUrl.toHttpUrl().host }
 
     private val domainMutex = Mutex()
     private var domainFetched = false
+    private var activeBaseUrl = baseUrl
 
+    // Ikigai rota dominios: ikigaimangas.com publica el dominio vigente en su
+    // JS de landing. Sin SharedPreferences el dominio se refresca en memoria.
     private suspend fun fetchDomainUrl() {
-        if (domainFetched || !preferences.fetchDomainPref()) return
+        if (domainFetched) return
         domainMutex.withLock {
-            if (domainFetched || !preferences.fetchDomainPref()) return
+            if (domainFetched) return
 
             try {
                 val initClient = network.client
@@ -68,15 +62,12 @@ abstract class IkigaiMangas :
                     val script = response.body.string()
                     val domain = script.substringAfter("i(\"").substringBefore("\"")
                     val host = initClient.newCall(GET(domain, headers)).execute().request.url.host
-                    val newDomain = "https://$host"
-                    preferences.edit().putString(BASE_URL_PREF, newDomain).apply()
+                    activeBaseUrl = "https://$host"
                     domainFetched = true
                 }
             } catch (_: Exception) {}
         }
     }
-
-    private val imageCdnUrl: String = "https://image2.ikigaimangas.cloud"
 
     private fun nsfwCookieInterceptor(chain: Interceptor.Chain): Response {
         val request = chain.request()
@@ -106,8 +97,6 @@ abstract class IkigaiMangas :
         return this.header("Cookie", mergedHeader)
     }
 
-    private val preferences = getPreferences()
-
     override fun Headers.Builder.configureHeaders() = apply {
         set("Sec-Fetch-Dest", "document")
         set("Sec-Fetch-Mode", "navigate")
@@ -120,10 +109,10 @@ abstract class IkigaiMangas :
         fetchDomainUrl()
 
         val headers = headersBuilder()
-            .enableNsfw(preferences.showNsfwPref)
+            .enableNsfw(NSFW_ENABLED)
             .build()
 
-        val document = client.get("$baseUrl/clasificacion/", headers).asJsoup()
+        val document = client.get("$activeBaseUrl/clasificacion/", headers).asJsoup()
 
         val mangaList = document.select("div.grid > div.card").map { element ->
             SManga.create().apply {
@@ -140,10 +129,10 @@ abstract class IkigaiMangas :
         fetchDomainUrl()
 
         val headers = headersBuilder()
-            .enableNsfw(preferences.showNsfwPref)
+            .enableNsfw(NSFW_ENABLED)
             .build()
 
-        val document = client.get("$baseUrl/?pagina=$page", headers).asJsoup()
+        val document = client.get("$activeBaseUrl/?pagina=$page", headers).asJsoup()
 
         val mangaList = document.select("section[aria-labelledby=new-chapters-heading] > ul.grid:last-of-type a.card").map { element ->
             SManga.create().apply {
@@ -159,15 +148,17 @@ abstract class IkigaiMangas :
     override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
         fetchDomainUrl()
 
+        // La búsqueda por texto del sitio usa RPC de Qwik que requiere ejecutar
+        // JavaScript; en Tachimanga solo queda la exploración por filtros.
         if (query.isNotEmpty()) {
-            return qwikDataParse(query, getQuerySeriesList(), page)
+            return MangasPage(emptyList(), false)
         }
 
         val headers = headersBuilder()
-            .enableNsfw(preferences.showNsfwPref)
+            .enableNsfw(NSFW_ENABLED)
             .build()
 
-        val searchUrl = "$baseUrl/series/".toHttpUrl().newBuilder()
+        val searchUrl = "$activeBaseUrl/series/".toHttpUrl().newBuilder()
             .addQueryParameter("tipos[]", "comic")
 
         filters.forEach { filter ->
@@ -209,45 +200,6 @@ abstract class IkigaiMangas :
         return MangasPage(mangaList, hasNextPage)
     }
 
-    private var seriesCache: Deferred<List<QwikSeriesDto>>? = null
-
-    private suspend fun getQuerySeriesList(): List<QwikSeriesDto> {
-        val deferred = seriesCache ?: coroutineScope {
-            async {
-                val qfunc = getQfuncFromWebView(baseUrl, headers)
-                val url = baseUrl.toHttpUrl().newBuilder()
-                    .addQueryParameter("qfunc", qfunc)
-                    .build()
-                val payload = """{"_entry":"1","_objs":["\u0002_#s_$qfunc",["0"]]}"""
-                val body = payload.toRequestBody()
-                val headers = headersBuilder()
-                    .set("X-QRL", qfunc)
-                    .set("Content-Type", "application/qwik-json")
-                    .build()
-                client.post(url, headers, body).use { response ->
-                    response.parseAs<QwikData>().parseAsList<QwikSeriesDto>()
-                }
-            }.also { seriesCache = it }
-        }
-        return deferred.await()
-    }
-
-    private fun qwikDataParse(query: String, seriesList: List<QwikSeriesDto>, page: Int): MangasPage {
-        val nsfwEnabled = preferences.showNsfwPref
-
-        val filteredSeries = seriesList
-            .filter { it.type == "comic" }
-            .filter { nsfwEnabled || !it.isMature }
-            .filter { it.name.contains(query, ignoreCase = true) }
-
-        val pagedSeries = filteredSeries
-            .drop((page - 1) * PAGE_SIZE)
-            .take(PAGE_SIZE)
-            .map { it.toSManga(imageCdnUrl) }
-
-        return MangasPage(pagedSeries, filteredSeries.size > page * PAGE_SIZE)
-    }
-
     override fun getMangaUrl(manga: SManga) = "$baseUrl/series/${manga.url}/"
     override fun getChapterUrl(chapter: SChapter) = baseUrl + chapter.url
 
@@ -259,7 +211,7 @@ abstract class IkigaiMangas :
     ): SMangaUpdate {
         fetchDomainUrl()
 
-        val document = client.get("$baseUrl/series/${manga.url}/").asJsoup()
+        val document = client.get("$activeBaseUrl/series/${manga.url}/").asJsoup()
         val mainContent = document.selectFirst("main")!!
         val updatedManga = SManga.create().apply {
             title = mainContent.selectFirst(".card-body .card-title")!!.text()
@@ -288,7 +240,7 @@ abstract class IkigaiMangas :
         val remainingChapters = coroutineScope {
             (2..lastPage).map { page ->
                 async {
-                    val url = "$baseUrl/series/${manga.url}/"
+                    val url = "$activeBaseUrl/series/${manga.url}/"
                         .toHttpUrl()
                         .newBuilder()
                         .addQueryParameter("pagina", page.toString())
@@ -328,12 +280,12 @@ abstract class IkigaiMangas :
         fetchDomainUrl()
 
         val headers = headersBuilder()
-            .enableNsfw(preferences.showNsfwPref)
+            .enableNsfw(NSFW_ENABLED)
             .build()
 
-        var document = client.get(baseUrl + chapter.url, headers).asJsoup()
+        var document = client.get(activeBaseUrl + chapter.url, headers).asJsoup()
         document.selectFirst("button > span:contains(permitir nsfw)")?.let {
-            val newRequest = GET(baseUrl + chapter.url, headers)
+            val newRequest = GET(activeBaseUrl + chapter.url, headers)
                 .newBuilder()
                 .enableNsfw(true)
                 .build()
@@ -351,117 +303,18 @@ abstract class IkigaiMangas :
         .build()
 
     override fun getFilterList(data: JsonElement?) = FilterList(
-        Filter.Header("Nota: Los filtros son ignorados si se realiza una búsqueda por texto."),
+        Filter.Header("Nota: la búsqueda por texto no está disponible en iOS; usa los filtros."),
         Filter.Separator(),
         SortByFilter("Ordenar por", getSortProperties()),
         StatusFilter("Estados", getStatusFilters()),
         GenreFilter("Géneros", getGenreFilters()),
     )
 
-    override fun setupPreferenceScreen(screen: PreferenceScreen) {
-        SwitchPreferenceCompat(screen.context).apply {
-            key = SHOW_NSFW_PREF
-            title = "Mostrar contenido NSFW"
-            setDefaultValue(false)
-        }.also { screen.addPreference(it) }
-
-        SwitchPreferenceCompat(screen.context).apply {
-            key = FETCH_DOMAIN_PREF
-            title = "Buscar dominio automáticamente"
-            summary = "Intenta buscar el dominio automáticamente al abrir la fuente."
-            setDefaultValue(true)
-        }.also { screen.addPreference(it) }
-    }
-
-    private fun SharedPreferences.fetchDomainPref() = getBoolean(FETCH_DOMAIN_PREF, true)
-
-    private var SharedPreferences.showNsfwPref: Boolean
-        get() = getBoolean(SHOW_NSFW_PREF, false)
-        set(value) {
-            edit().putBoolean(SHOW_NSFW_PREF, value).apply()
-        }
-
-    private suspend fun getQfuncFromWebView(
-        url: String,
-        headers: Headers,
-    ): String = runWebView(timeout = 20.seconds) {
-        val pool = ('a'..'z') + ('A'..'Z')
-        val interfaceName = (1..(10..20).random())
-            .map { pool.random() }
-            .joinToString("")
-
-        javaScriptEnabled = true
-        domStorageEnabled = true
-        blockImages = true
-        userAgent = headers["User-Agent"].orEmpty()
-
-        jsBridge(interfaceName) { qfunc ->
-            resolve(qfunc)
-        }
-
-        onPageFinished {
-            evaluateJs(
-                """
-                    (function () {
-                        const originalFetch = window.fetch;
-                        window.fetch = async function(resource, options) {
-                            let url = "";
-                            if (typeof resource === "string") {
-                                url = resource;
-                            } else if (resource && resource.url) {
-                                url = resource.url;
-                            }
-                            if (url.includes("qfunc")) {
-                                const match = url.match(/[?&]qfunc=([^&]+)/);
-                                if (match) {
-                                    const qfunc = decodeURIComponent(match[1]);
-                                    window.$interfaceName.post(qfunc);
-                                }
-                            }
-                            return originalFetch.apply(this, arguments);
-                        };
-                    })();
-                """.trimIndent(),
-            )
-
-            evaluateJs(
-                """
-                    (function () {
-                        let tries = 0;
-                        const interval = setInterval(() => {
-                            const btn = [...document.querySelectorAll('button')]
-                                .find(button =>
-                                    [...button.querySelectorAll('span')]
-                                        .some(span =>
-                                            span.textContent?.trim().includes('Buscar...')
-                                        )
-                                );
-                            if (btn) {
-                                clearInterval(interval);
-                                btn.click();
-                                return;
-                            }
-                            tries++;
-                            if (tries >= 20) {
-                                clearInterval(interval);
-                            }
-                        }, 500);
-                    })();
-                """.trimIndent(),
-            )
-        }
-
-        loadUrl(url)
-    }
-
     private fun Headers.Builder.enableNsfw(flag: Boolean) = this.set(ENABLE_NSFW_HEADER, flag.toString())
     private fun Request.Builder.enableNsfw(flag: Boolean) = this.header(ENABLE_NSFW_HEADER, flag.toString())
 
     companion object {
-        private const val SHOW_NSFW_PREF = "pref_show_nsfw"
-        private const val BASE_URL_PREF = "overrideBaseUrl"
-        private const val FETCH_DOMAIN_PREF = "fetchDomain"
-        private const val PAGE_SIZE = 20
+        private const val NSFW_ENABLED = true
         private const val ENABLE_NSFW_HEADER = "X-Add-Nsfw-Cookie"
     }
 }

@@ -6,15 +6,17 @@ plugins {
 
 keiyoushi {
     name = "Ikigai Mangas"
-    versionCode = 40
+    versionCode = 42
     contentWarning = ContentWarning.MIXED
     libVersion = "1.6"
 
     source {
         lang = "es"
-        baseUrl {
-            custom("https://visorikigai.gettocaboca.com")
-        }
+        baseUrl = "https://visorikigai.gettocaboca.com"
         versionId = 2
     }
 }
+
+// ProGuard (createReleaseExtensionJar) rompe con rutas con espacios
+// ("Devin - Sesiones Individuales"): se mueve buildDir fuera del checkout.
+layout.buildDirectory.set(File(System.getProperty("user.home"), ".aeternum-ext-build/${project.path.replace(':', '_')}"))

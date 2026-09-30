@@ -1,10 +1,5 @@
 package eu.kanade.tachiyomi.extension.all.novelcool
 
-import android.content.SharedPreferences
-import androidx.preference.PreferenceScreen
-import androidx.preference.SwitchPreferenceCompat
-import eu.kanade.tachiyomi.source.ConfigurableSource
-import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
@@ -17,26 +12,19 @@ import keiyoushi.network.post
 import keiyoushi.network.rateLimit
 import keiyoushi.source.KeiSource
 import keiyoushi.utils.asJsoup
-import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parseAs
-import keiyoushi.utils.toJsonElement
 import keiyoushi.utils.toJsonRequestBody
 import keiyoushi.utils.tryParseDate
-import kotlinx.serialization.json.JsonElement
-import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
 import okhttp3.Response
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
-import org.jsoup.select.Elements
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 
 @Source
-abstract class NovelCool :
-    KeiSource(),
-    ConfigurableSource {
+abstract class NovelCool : KeiSource() {
 
     private val siteLang: String get() = if (lang == "pt-BR") "br" else lang
 
@@ -50,100 +38,11 @@ abstract class NovelCool :
             .build()
     }
 
-    private val preference by getPreferencesLazy()
+    override suspend fun getPopularManga(page: Int): MangasPage = commonApiRequest("$apiUrl/elite/hot/", page)
 
-    override suspend fun getPopularManga(page: Int): MangasPage = when (preference.useAppApi) {
-        true -> commonApiRequest("$apiUrl/elite/hot/", page)
-        else -> parseMangasPage(client.get("$baseUrl/category/new_list.html").asJsoup())
-    }
+    override suspend fun getLatestUpdates(page: Int): MangasPage = commonApiRequest("$apiUrl/elite/latest/", page)
 
-    override suspend fun getLatestUpdates(page: Int): MangasPage = when (preference.useAppApi) {
-        true -> commonApiRequest("$apiUrl/elite/latest/", page)
-        else -> parseMangasPage(client.get("$baseUrl/category/latest.html").asJsoup())
-    }
-
-    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
-        if (preference.useAppApi) {
-            return commonApiRequest("$apiUrl/book/search/", page, query)
-        }
-
-        val url = "$baseUrl/search".toHttpUrl().newBuilder().apply {
-            addQueryParameter("name", query.trim())
-
-            filters.forEach { filter ->
-                when (filter) {
-                    is AuthorFilter -> {
-                        addQueryParameter("author", filter.state.trim())
-                    }
-
-                    is GenreFilter -> {
-                        addQueryParameter("category_id", filter.included.joinToString(",", ","))
-                        addQueryParameter("out_category_id", filter.excluded.joinToString(",", ","))
-                    }
-
-                    is StatusFilter -> {
-                        addQueryParameter("completed_series", filter.getValue())
-                    }
-
-                    is RatingFilter -> {
-                        addQueryParameter("rate_star", filter.getValue())
-                    }
-
-                    else -> { }
-                }
-            }
-
-            addQueryParameter("page", page.toString())
-        }.build()
-
-        return parseMangasPage(client.get(url).asJsoup())
-    }
-
-    private fun parseMangasPage(document: Document): MangasPage {
-        val mangas = document.select(".book-list .book-item:not(:has(.book-type-novel))").map { element ->
-            SManga.create().apply {
-                title = element.select(".book-pic").attr("title")
-                setUrlWithoutDomain(element.select("a").attr("href"))
-                thumbnail_url = element.select("img").imgAttr()
-            }
-        }
-        val hasNextPage = document.selectFirst("div.page-nav a div.next") != null
-        return MangasPage(mangas, hasNextPage)
-    }
-
-    override val supportsFilterFetching get() = !preference.useAppApi
-
-    override suspend fun fetchFilterData(): JsonElement {
-        val document = client.get("$baseUrl/search/").asJsoup()
-
-        return document.selectFirst(".category-list")
-            ?.select(".category-id-item")
-            .orEmpty()
-            .map { div ->
-                Pair(
-                    div.attr("title"),
-                    div.attr("cate_id"),
-                )
-            }.toJsonElement()
-    }
-
-    override fun getFilterList(data: JsonElement?): FilterList {
-        if (preference.useAppApi) {
-            return FilterList(Filter.Header("Not supported when using App API"))
-        }
-
-        val filters: MutableList<Filter<*>> = mutableListOf(
-            AuthorFilter("Author"),
-            StatusFilter("Status", getStatusList()),
-            RatingFilter("Rating", getRatingList()),
-        )
-
-        data?.parseAs<List<Pair<String, String>>>()?.also {
-            filters.add(GenreFilter("Genres", it))
-        }
-
-        return FilterList(filters)
-    }
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage = commonApiRequest("$apiUrl/book/search/", page, query)
 
     override suspend fun fetchMangaUpdate(
         manga: SManga,
@@ -230,23 +129,6 @@ abstract class NovelCool :
         return document.select(".mangaread-manga-pic").attr("src")
     }
 
-    private fun Elements.imgAttr(): String = when {
-        hasAttr("lazy_url") -> attr("abs:lazy_url")
-        else -> attr("abs:src")
-    }
-
-    override fun setupPreferenceScreen(screen: PreferenceScreen) {
-        SwitchPreferenceCompat(screen.context).apply {
-            key = PREF_API_SEARCH
-            title = "Use App API for browse"
-            summary = "Results may be more reliable"
-            setDefaultValue(true)
-        }.also(screen::addPreference)
-    }
-
-    private val SharedPreferences.useAppApi: Boolean
-        get() = getBoolean(PREF_API_SEARCH, true)
-
     private fun jsRedirect(chain: Interceptor.Chain): Response {
         val request = chain.request()
         val headers = request.headers.newBuilder()
@@ -318,8 +200,6 @@ abstract class NovelCool :
         private val imageUrlRegex = Regex("""["'](https?://[^"']+)["']""")
 
         private val JS_REDIRECT_REGEX = Regex("""window\.location\.href\s*=\s*["']([^"']+)["']""")
-
-        private const val PREF_API_SEARCH = "pref_use_search_api"
 
         // copied from Madara
         private val completedStatusList: Array<String> = arrayOf(

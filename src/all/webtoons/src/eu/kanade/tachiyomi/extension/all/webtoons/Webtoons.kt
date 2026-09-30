@@ -1,8 +1,5 @@
 package eu.kanade.tachiyomi.extension.all.webtoons
 
-import androidx.preference.PreferenceScreen
-import androidx.preference.SwitchPreferenceCompat
-import eu.kanade.tachiyomi.source.ConfigurableSource
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
@@ -10,19 +7,13 @@ import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
-import keiyoushi.lib.textinterceptor.TextInterceptor
-import keiyoushi.lib.textinterceptor.TextInterceptorHelper
-import keiyoushi.network.addCookie
 import keiyoushi.network.get
 import keiyoushi.network.rateLimit
 import keiyoushi.source.KeiSource
 import keiyoushi.utils.asJsoup
-import keiyoushi.utils.firstInstanceOrNull
-import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parseAs
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
-import kotlinx.serialization.json.JsonElement
 import okhttp3.Headers
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -35,9 +26,7 @@ import java.text.DecimalFormat
 import java.util.Calendar
 
 @Source
-abstract class Webtoons :
-    KeiSource(),
-    ConfigurableSource {
+abstract class Webtoons : KeiSource() {
     // Due to lang code getting more specific for zh-Hant
     private val langCode: String get() = if (lang == "zh-Hant") "zh-hant" else lang
     private val localeForCookie: String get() = if (lang == "zh-Hant") "zh_TW" else lang
@@ -52,30 +41,27 @@ abstract class Webtoons :
 
     override val supportRelatedMangasBySearch = true
 
+    // Sin addCookie (CookieManager/android.webkit) ni TextInterceptor (android.graphics):
+    // no existen en el runtime J9 de Tachimanga. La cookie va como header fijo.
     override fun OkHttpClient.Builder.configureClient() = apply {
-        addCookie(
-            domain = { "webtoons.com" },
-            cookies = {
-                listOf(
-                    "ageGatePass" to "true",
-                    "locale" to localeForCookie,
-                    "needGDPR" to "false",
-                )
-            },
-        )
         addInterceptor { chain ->
-            // m.webtoons.com throws an SSL error that can be solved by a simple retry
+            val request = chain.request()
+            val newRequest = if (request.url.host.endsWith("webtoons.com")) {
+                request.newBuilder()
+                    .header("Cookie", "ageGatePass=true; locale=$localeForCookie; needGDPR=false")
+                    .build()
+            } else {
+                request
+            }
             try {
-                chain.proceed(chain.request())
+                chain.proceed(newRequest)
             } catch (e: SocketException) {
-                chain.proceed(chain.request())
+                // m.webtoons.com throws an SSL error that can be solved by a simple retry
+                chain.proceed(newRequest)
             }
         }
-        addInterceptor(TextInterceptor())
         rateLimit(1) { it.host == mobileUrl.toHttpUrl().host }
     }
-
-    private val preferences by getPreferencesLazy()
 
     override suspend fun getPopularManga(page: Int): MangasPage {
         val ranking = when (page) {
@@ -118,23 +104,14 @@ abstract class Webtoons :
         return MangasPage(entries, hasNextPage = false)
     }
 
-    override fun getFilterList(data: JsonElement?): FilterList = FilterList(
-        SearchType(),
-    )
-
     override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
+        // El sitio migró la búsqueda SSR a /search/result
         val url = baseUrl.toHttpUrl().newBuilder().apply {
-            var searchTypeAdded = false
             addPathSegment(langCode)
             addPathSegment("search")
-            filters.firstInstanceOrNull<SearchType>()?.selected?.also {
-                searchTypeAdded = true
-                addPathSegment(it)
-            }
+            addPathSegment("result")
             addQueryParameter("keyword", query)
-            if (page > 1 && searchTypeAdded) {
-                addQueryParameter("page", page.toString())
-            }
+            addQueryParameter("page", page.toString())
         }.build()
 
         val document = client.get(url).asJsoup()
@@ -285,7 +262,7 @@ abstract class Webtoons :
             }
         }
 
-        if (useSequentialNumberingPref() || unrecognized > recognized) {
+        if (unrecognized > recognized) {
             chapters.onEachIndexed { index, chapter ->
                 chapter.chapterNumber = (index + 1).toFloat()
             }
@@ -346,38 +323,15 @@ abstract class Webtoons :
 
     override suspend fun getPageList(chapter: SChapter): List<Page> {
         val document = client.get(getChapterUrl(chapter)).asJsoup()
-        val useMaxQuality = useMaxQualityPref()
 
         val pages = document.select("div#_imageList > img").mapIndexed { i, element ->
-            val imageUrl = element.attr("data-url").toHttpUrl()
-
-            if (useMaxQuality && imageUrl.queryParameter("type") == "q90") {
-                val newImageUrl = imageUrl.newBuilder().apply {
-                    removeAllQueryParameters("type")
-                }.build()
-                Page(i, imageUrl = newImageUrl.toString())
-            } else {
-                Page(i, imageUrl = imageUrl.toString())
-            }
+            Page(i, imageUrl = element.attr("data-url"))
         }.toMutableList()
 
         if (pages.isEmpty()) {
             pages.addAll(
                 fetchMotionToonPages(document),
             )
-        }
-
-        if (showAuthorsNotesPref()) {
-            val note = document.select("div.creator_note p.author_text").text()
-
-            if (note.isNotEmpty()) {
-                val creator = document.select("div.creator_note .author_name span").text().trim()
-
-                pages += Page(
-                    pages.size,
-                    imageUrl = TextInterceptorHelper.createUrl("Author's Notes from $creator", note),
-                )
-            }
         }
 
         return pages
@@ -399,35 +353,4 @@ abstract class Webtoons :
                 Page(i, imageUrl = motionToonPath + entry.value)
             }
     }
-
-    private fun showAuthorsNotesPref() = preferences.getBoolean(SHOW_AUTHORS_NOTES_KEY, false)
-    private fun useMaxQualityPref() = preferences.getBoolean(USE_MAX_QUALITY_KEY, false)
-    private fun useSequentialNumberingPref() = preferences.getBoolean(USE_SEQUENTIAL_NUMBERING_KEY, false)
-
-    override fun setupPreferenceScreen(screen: PreferenceScreen) {
-        SwitchPreferenceCompat(screen.context).apply {
-            key = SHOW_AUTHORS_NOTES_KEY
-            title = "Show author's notes"
-            summary = "Enable to see the author's notes at the end of chapters (if they're there)."
-            setDefaultValue(false)
-        }.also(screen::addPreference)
-
-        SwitchPreferenceCompat(screen.context).apply {
-            key = USE_MAX_QUALITY_KEY
-            title = "Use maximum quality images"
-            summary = "Enable to load images in maximum quality."
-            setDefaultValue(false)
-        }.also(screen::addPreference)
-
-        SwitchPreferenceCompat(screen.context).apply {
-            key = USE_SEQUENTIAL_NUMBERING_KEY
-            title = "Use sequential chapter numbering"
-            summary = "Enable to use sequential numbering instead of official episode numbers."
-            setDefaultValue(false)
-        }.also(screen::addPreference)
-    }
 }
-
-private const val SHOW_AUTHORS_NOTES_KEY = "showAuthorsNotes"
-private const val USE_MAX_QUALITY_KEY = "useMaxQuality"
-private const val USE_SEQUENTIAL_NUMBERING_KEY = "useSequentialNumbering"

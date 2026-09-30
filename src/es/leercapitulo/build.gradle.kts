@@ -6,7 +6,7 @@ plugins {
 
 keiyoushi {
     name = "LeerCapitulo"
-    versionCode = 0
+    versionCode = 2
     contentWarning = ContentWarning.SAFE
     libVersion = "1.6"
 
@@ -19,3 +19,7 @@ keiyoushi {
         path("/manga/..*")
     }
 }
+
+// ProGuard (createReleaseExtensionJar) rompe con rutas con espacios
+// ("Devin - Sesiones Individuales"): se mueve buildDir fuera del checkout.
+layout.buildDirectory.set(File(System.getProperty("user.home"), ".aeternum-ext-build/${project.path.replace(':', '_')}"))
