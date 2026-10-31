@@ -38,7 +38,9 @@ import kotlin.time.Instant
 // the WebView (Google OAuth, shared cookie jar), or paste the session Cookie
 // header in the source settings — the value lives on-device only.
 @Source
-abstract class Rncalation : KeiSource(), ConfigurableSource {
+abstract class Rncalation :
+    KeiSource(),
+    ConfigurableSource {
 
     private val preferences by getPreferencesLazy()
 
