@@ -12,7 +12,11 @@ class TypeFilter : Filter.Select<String>("Status", arrayOf("Serializing", "Compl
     }
 }
 
-class GenreFilter(genres: List<TagName>) : Filter.Select<String>("Genre", (listOf("All") + genres.map(TagName::name)).toTypedArray()) {
-    private val slugs = listOf("") + genres.map(TagName::slug)
+class GenreFilter(tags: List<TagName>) :
+    Filter.Select<String>(
+        "Genre",
+        (listOf("All") + tags.map(TagName::name)).toTypedArray(),
+    ) {
+    private val slugs = listOf("") + tags.map(TagName::slug)
     val slug: String get() = slugs[state]
 }

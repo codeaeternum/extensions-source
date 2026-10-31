@@ -6,7 +6,7 @@ plugins {
 
 keiyoushi {
     name = "MANGA Plus by SHUEISHA"
-    versionCode = 66
+    versionCode = 1
     contentWarning = ContentWarning.SAFE
     libVersion = "1.6"
 
@@ -27,6 +27,4 @@ keiyoushi {
     }
 }
 
-dependencies {
-    implementation(project(":lib:i18n"))
-}
+layout.buildDirectory.set(file(System.getProperty("user.home") + "/.aeternum-ext-build/${project.path.replace(':', '_')}"))

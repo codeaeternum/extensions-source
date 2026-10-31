@@ -16,7 +16,7 @@ class ErrorResult(
     @ProtoNumber(2) val englishPopup: Popup? = null,
     @ProtoNumber(3) val spanishPopup: Popup? = null,
 ) {
-    fun langPopup(langCode: Int): Popup? = when (langCode) {
+    fun popupFor(langCode: Int): Popup? = when (langCode) {
         LANGUAGE_SPANISH -> spanishPopup ?: englishPopup
         else -> englishPopup
     }
@@ -39,18 +39,6 @@ class SuccessResult(
 )
 
 @Serializable
-class AllTitlesViewV3(
-    @ProtoNumber(2) val tags: List<TagName> = emptyList(),
-    @ProtoNumber(3) val titles: List<AllTitlesV3Entry> = emptyList(),
-)
-
-@Serializable
-class AllTitlesV3Entry(
-    @ProtoNumber(2) val title: Title,
-    @ProtoNumber(3) val genres: List<TagName> = emptyList(),
-)
-
-@Serializable
 class TitleRankingView(
     @ProtoNumber(3) val rankedTitles: List<RankedTitle> = emptyList(),
 )
@@ -58,6 +46,33 @@ class TitleRankingView(
 @Serializable
 class RankedTitle(
     @ProtoNumber(2) val titles: List<Title> = emptyList(),
+)
+
+@Serializable
+class WebHomeView(
+    @ProtoNumber(2) val groups: List<UpdatedTitleGroup> = emptyList(),
+    @ProtoNumber(7) val featured: FeaturedUpdate? = null,
+)
+
+@Serializable
+class FeaturedUpdate(
+    @ProtoNumber(2) val title: UpdatedTitle? = null,
+)
+
+@Serializable
+class UpdatedTitleGroup(
+    @ProtoNumber(2) val titles: List<UpdatedTitle> = emptyList(),
+)
+
+@Serializable
+class UpdatedTitle(
+    @ProtoNumber(3) val latestChapters: List<LatestChapter> = emptyList(),
+    @ProtoNumber(6) val updatedAt: Int = 0,
+)
+
+@Serializable
+class LatestChapter(
+    @ProtoNumber(1) val title: Title? = null,
 )
 
 @Serializable
@@ -71,30 +86,21 @@ class AllTitlesGroup(
 )
 
 @Serializable
-class WebHomeView(
-    @ProtoNumber(2) val groups: List<UpdatedTitleGroup> = emptyList(),
-    @ProtoNumber(7) val featured: FeaturedUpdate?,
+class AllTitlesViewV3(
+    @ProtoNumber(2) val tags: List<TagName> = emptyList(),
+    @ProtoNumber(3) val titles: List<AllTitlesV3Entry> = emptyList(),
 )
 
 @Serializable
-class FeaturedUpdate(
-    @ProtoNumber(2) val title: UpdatedTitle,
+class AllTitlesV3Entry(
+    @ProtoNumber(2) val title: Title,
+    @ProtoNumber(3) val genres: List<TagName> = emptyList(),
 )
 
 @Serializable
-class UpdatedTitleGroup(
-    @ProtoNumber(2) val titles: List<UpdatedTitle> = emptyList(),
-)
-
-@Serializable
-class UpdatedTitle(
-    @ProtoNumber(3) val latestChapters: List<LatestChapter>,
-    @ProtoNumber(6) val updatedAt: Int,
-)
-
-@Serializable
-class LatestChapter(
-    @ProtoNumber(1) val title: Title,
+class TagName(
+    @ProtoNumber(1) val name: String = "",
+    @ProtoNumber(2) val slug: String = "",
 )
 
 @Serializable
@@ -106,11 +112,11 @@ class Title(
     @ProtoNumber(7) val language: Int = LANGUAGE_ENGLISH,
 ) {
     fun toSManga(): SManga = SManga.create().apply {
+        url = "/titles/$titleId"
         title = name
         author = this@Title.author?.replace(" / ", ", ")
         artist = author
         thumbnail_url = portraitImageUrl
-        url = "#/titles/$titleId"
     }
 }
 
@@ -126,17 +132,16 @@ class TitleDetailView(
     val chapterList: List<Chapter>
         get() = chapterListGroup.flatMap { it.firstChapterList + it.lastChapterList }
 
-    private val isOneShot: Boolean
-        get() = genreList.any { it.slug == "one-shot" }
-
     fun toSManga(): SManga = title.toSManga().apply {
         description = listOf(overview, viewingPeriodDescription)
             .filter(String::isNotEmpty)
             .joinToString("\n\n")
         genre = genreList.mapNotNull { it.name.takeIf(String::isNotEmpty) }.joinToString()
         status = when {
-            isOneShot || nonAppearanceInfo.contains(COMPLETED_REGEX) || viewingPeriodDescription.contains("latest 0 chapters") -> SManga.COMPLETED
-            nonAppearanceInfo.contains(HIATUS_REGEX) -> SManga.ON_HIATUS
+            genreList.any { it.slug == "one-shot" } ||
+                COMPLETED_REGEX.containsMatchIn(nonAppearanceInfo) ||
+                viewingPeriodDescription.contains("latest 0 chapters") -> SManga.COMPLETED
+            HIATUS_REGEX.containsMatchIn(nonAppearanceInfo) -> SManga.ON_HIATUS
             else -> SManga.ONGOING
         }
     }
@@ -146,12 +151,6 @@ class TitleDetailView(
         private val HIATUS_REGEX = "on a hiatus".toRegex(RegexOption.IGNORE_CASE)
     }
 }
-
-@Serializable
-class TagName(
-    @ProtoNumber(1) val name: String = "",
-    @ProtoNumber(2) val slug: String = "",
-)
 
 @Serializable
 class ChapterListGroup(
@@ -166,18 +165,14 @@ class Chapter(
     @ProtoNumber(4) val subTitle: String? = null,
     @ProtoNumber(6) val startTimeStamp: Int = 0,
 ) {
-    val isExpired: Boolean
-        get() = subTitle == null
+    // Expired chapters keep an entry in the list but lose their subtitle.
+    val isExpired: Boolean get() = subTitle == null
 
-    fun toSChapter(subtitlePref: Boolean): SChapter = SChapter.create().apply {
-        name = if (subtitlePref && subTitle != null) {
-            subTitle
-        } else {
-            "${this@Chapter.name} - $subTitle"
-        }
-        date_upload = 1000L * startTimeStamp
-        url = "#/viewer/$chapterId"
+    fun toSChapter(): SChapter = SChapter.create().apply {
+        url = "/viewer/$chapterId"
+        name = "${this@Chapter.name} - $subTitle"
         chapter_number = this@Chapter.name.substringAfter("#").toFloatOrNull() ?: -1f
+        date_upload = 1000L * startTimeStamp
         scanlator = "MANGA Plus"
     }
 }
@@ -185,7 +180,7 @@ class Chapter(
 @Serializable
 class MangaViewer(
     @ProtoNumber(1) val pages: List<MangaPlusPage> = emptyList(),
-    @ProtoNumber(9) val titleId: Int? = null,
+    @ProtoNumber(9) val titleId: Int = 0,
     @ProtoNumber(19) val viewToken: String? = null,
 )
 

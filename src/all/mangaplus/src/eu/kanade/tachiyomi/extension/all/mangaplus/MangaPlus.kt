@@ -1,11 +1,5 @@
 package eu.kanade.tachiyomi.extension.all.mangaplus
 
-import android.content.SharedPreferences
-import androidx.preference.ListPreference
-import androidx.preference.PreferenceScreen
-import androidx.preference.SwitchPreferenceCompat
-import eu.kanade.tachiyomi.network.GET
-import eu.kanade.tachiyomi.source.ConfigurableSource
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
@@ -13,14 +7,12 @@ import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
-import keiyoushi.lib.i18n.Intl
 import keiyoushi.network.get
 import keiyoushi.network.rateLimit
 import keiyoushi.source.KeiSource
 import keiyoushi.utils.decodeHex
 import keiyoushi.utils.firstInstance
 import keiyoushi.utils.firstInstanceOrNull
-import keiyoushi.utils.getPreferences
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.parseAsProto
 import keiyoushi.utils.toJsonElement
@@ -28,19 +20,17 @@ import kotlinx.serialization.json.JsonElement
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Interceptor
-import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
 import okhttp3.ResponseBody.Companion.asResponseBody
 import okio.Buffer
+import okio.ForwardingSource
 import okio.buffer
 import java.util.UUID
 
 @Source
-abstract class MangaPlus :
-    KeiSource(),
-    ConfigurableSource {
+abstract class MangaPlus : KeiSource() {
 
     private val internalLangName: String
         get() = when (lang) {
@@ -53,7 +43,7 @@ abstract class MangaPlus :
             "th" -> "tha"
             "vi" -> "vie"
             "de" -> "deu"
-            else -> throw IllegalStateException("Unsupported lang: $lang")
+            else -> throw IllegalStateException("Unsupported language: $lang")
         }
 
     private val internalLangCode: Int
@@ -67,41 +57,70 @@ abstract class MangaPlus :
             "th" -> LANGUAGE_THAI
             "vi" -> LANGUAGE_VIETNAMESE
             "de" -> LANGUAGE_GERMAN
-            else -> throw IllegalStateException("Unsupported lang: $lang")
+            else -> throw IllegalStateException("Unsupported language: $lang")
         }
 
-    private val apiUrlHost get() = API_URL.toHttpUrl().host
-    private val baseUrlHost get() = baseUrl.toHttpUrl().host
+    private val apiHost = API_URL.toHttpUrl().host
+    private val siteHost get() = baseUrl.toHttpUrl().host
 
-    private val session = UUID.randomUUID().toString()
+    private val sessionToken = UUID.randomUUID().toString()
 
     override fun OkHttpClient.Builder.configureClient() = apply {
-        addInterceptor(::sessionTokenIntercept)
-        addInterceptor(::imageIntercept)
-        rateLimit(1) { it.host == apiUrlHost }
-        rateLimit(2) { it.host == baseUrlHost }
+        addInterceptor(::sessionTokenInterceptor)
+        addInterceptor(::imageDecryptInterceptor)
+        rateLimit(1) { it.host == apiHost }
+        rateLimit(2) { it.host == siteHost }
     }
 
-    private fun sessionTokenIntercept(chain: Interceptor.Chain): Response {
+    private fun sessionTokenInterceptor(chain: Interceptor.Chain): Response {
         val request = chain.request()
-        if (request.url.host != apiUrlHost) return chain.proceed(request)
+        if (request.url.host != apiHost) return chain.proceed(request)
         return chain.proceed(
             request.newBuilder()
-                .header("SESSION-TOKEN", session)
+                .header("SESSION-TOKEN", sessionToken)
                 .build(),
         )
     }
 
-    private val intl by lazy {
-        Intl(
-            language = lang,
-            baseLanguage = "en",
-            availableLanguages = setOf("en", "pt-BR", "vi"),
-            classLoader = this::class.java.classLoader!!,
-        )
+    // Encrypted pages carry their XOR key as a URL fragment ("#a1b2..."), which
+    // OkHttp keeps client-side only; the stream is decrypted on the fly.
+    private fun imageDecryptInterceptor(chain: Interceptor.Chain): Response {
+        val request = chain.request()
+        val response = chain.proceed(request)
+        val key = request.url.fragment?.decodeHex()
+            ?.takeIf { it.isNotEmpty() }
+            ?: return response
+
+        val decrypted = XorDecryptSource(response.body.source(), key)
+        return response.newBuilder()
+            .body(
+                decrypted.buffer().asResponseBody(
+                    response.body.contentType(),
+                    response.body.contentLength(),
+                ),
+            )
+            .build()
     }
 
-    private val preferences = getPreferences()
+    private class XorDecryptSource(
+        delegate: okio.Source,
+        private val key: ByteArray,
+    ) : ForwardingSource(delegate) {
+        private val chunk = Buffer()
+        private var offset = 0
+
+        override fun read(sink: Buffer, byteCount: Long): Long {
+            val read = super.read(chunk, byteCount)
+            if (read == -1L) return -1L
+
+            val bytes = chunk.readByteArray()
+            for (i in bytes.indices) {
+                bytes[i] = (bytes[i].toInt() xor (key[offset++ % key.size].toInt() and 0xFF)).toByte()
+            }
+            sink.write(bytes)
+            return read
+        }
+    }
 
     override suspend fun getPopularManga(page: Int): MangasPage {
         val result = client.get("$API_URL/title_list/rankingV2?lang=$internalLangName&type=hottest&clang=$internalLangName")
@@ -118,28 +137,23 @@ abstract class MangaPlus :
         val result = client.get("$API_URL/web/web_homeV4?lang=$internalLangName&clang=$internalLangName")
             .parseAsProto<MangaPlusResponse>()
 
-        val webHomeView = result.successOrThrow().webHomeView!!
-        val entries = webHomeView.groups.flatMap(UpdatedTitleGroup::titles) + listOfNotNull(webHomeView.featured?.title)
-        val titles = entries
+        val homeView = result.successOrThrow().webHomeView!!
+        val updated = homeView.groups.flatMap(UpdatedTitleGroup::titles) + listOfNotNull(homeView.featured?.title)
+        val titles = updated
             .sortedByDescending(UpdatedTitle::updatedAt)
             .flatMap(UpdatedTitle::latestChapters)
-            .map(LatestChapter::title)
+            .mapNotNull(LatestChapter::title)
             .filterByLang()
-            .map(Title::toSManga)
 
-        return MangasPage(titles, hasNextPage = false)
+        return MangasPage(titles.map(Title::toSManga), hasNextPage = false)
     }
-
-    // =============================== Search ===============================
 
     override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
         val typeFilter = filters.firstInstance<TypeFilter>()
         val genreSlug = filters.firstInstanceOrNull<GenreFilter>()?.slug.orEmpty()
 
-        // allV2 returns everything while v3 returns based on type filter (serializations/completed etc.)
-        val useAllTitles = query.isNotEmpty() && genreSlug.isEmpty() && typeFilter.isDefault
-
-        val titles = if (useAllTitles) {
+        // allV2 returns the whole catalog; all_v3 is scoped to the status filter.
+        val titles = if (query.isNotEmpty() && genreSlug.isEmpty() && typeFilter.isDefault) {
             client.get("$API_URL/title_list/allV2").parseAsProto<MangaPlusResponse>()
                 .successOrThrow().allTitlesView!!.allTitlesGroup
                 .flatMap(AllTitlesGroup::titles)
@@ -161,41 +175,37 @@ abstract class MangaPlus :
         return MangasPage(filtered.map(Title::toSManga), hasNextPage = false)
     }
 
-    override val supportsFilterFetching get() = true
+    override val supportsFilterFetching = true
 
     override suspend fun fetchFilterData(): JsonElement {
         val result = client.get(allTitlesV3Url(TypeFilter.DEFAULT_TYPE)).parseAsProto<MangaPlusResponse>()
         return result.success?.allTitlesViewV3?.tags.orEmpty().toJsonElement()
     }
 
-    override fun getFilterList(data: JsonElement?): FilterList {
-        val genres = data?.parseAs<List<TagName>>().orEmpty()
-        return FilterList(
-            buildList {
-                add(TypeFilter())
-                if (genres.isNotEmpty()) {
-                    add(GenreFilter(genres))
-                }
-            },
-        )
-    }
+    override fun getFilterList(data: JsonElement?): FilterList = FilterList(
+        buildList {
+            add(TypeFilter())
+            val genres = data?.parseAs<List<TagName>>().orEmpty()
+            if (genres.isNotEmpty()) {
+                add(GenreFilter(genres))
+            }
+        },
+    )
 
     override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
         if (url.host !in MANGAPLUS_HOSTS) return null
 
+        val segments = url.pathSegments
         val titleId = when {
-            url.pathSegments.firstOrNull() == "titles" -> url.pathSegments.getOrNull(1)
-            url.pathSegments.firstOrNull() == "viewer" ->
-                url.pathSegments.getOrNull(1)?.let { titleIdFromChapter(it) }
-            url.pathSegments.lastOrNull() == "sns_share" -> url.queryParameter("title_id")
+            segments.firstOrNull() == "titles" -> segments.getOrNull(1)
+            segments.firstOrNull() == "viewer" -> segments.getOrNull(1)?.let { titleIdFromChapter(it) }
+            segments.lastOrNull() == "sns_share" -> url.queryParameter("title_id")
             else -> null
         } ?: return null
 
-        val titleDetail = getTitleDetails(titleId)
+        return getTitleDetail(titleId)
             .takeIf { it.title.language == internalLangCode }
-            ?: return null
-
-        return titleDetail.toSManga()
+            ?.toSManga()
     }
 
     override suspend fun fetchMangaUpdate(
@@ -204,180 +214,84 @@ abstract class MangaPlus :
         fetchDetails: Boolean,
         fetchChapters: Boolean,
     ): SMangaUpdate {
-        val titleDetail = getTitleDetails(manga.url.substringAfterLast("/"))
-            .takeIf { it.title.language == internalLangCode }
-            ?: throw Exception(intl["not_available"])
+        val detail = getTitleDetail(manga.url.substringAfterLast("/"))
+        if (detail.title.language != internalLangCode) {
+            throw Exception("This title is not available in this language")
+        }
 
-        val subtitleOnly = preferences.subtitleOnly()
-        val chapterList = titleDetail.chapterList
+        val chapterList = detail.chapterList
             .filterNot(Chapter::isExpired)
-            .map { it.toSChapter(subtitleOnly) }
+            .map(Chapter::toSChapter)
             .reversed()
 
-        return SMangaUpdate(titleDetail.toSManga(), chapterList)
+        return SMangaUpdate(detail.toSManga(), chapterList)
     }
-
-    override val supportsRelatedMangas get() = true
-
-    override suspend fun fetchRelatedMangaList(manga: SManga): List<SManga> {
-        val genres = manga.genre?.split(", ")?.filter(String::isNotEmpty)?.toSet().orEmpty()
-        if (genres.isEmpty()) return emptyList()
-
-        val titleId = manga.url.substringAfterLast("/")
-        val result = client.get(allTitlesV3Url(TypeFilter.DEFAULT_TYPE)).parseAsProto<MangaPlusResponse>()
-
-        return result.success?.allTitlesViewV3?.titles.orEmpty()
-            .filter { entry -> entry.genres.any { it.name in genres } }
-            .map(AllTitlesV3Entry::title)
-            .filterByLang()
-            .filter { it.titleId.toString() != titleId }
-            .map(Title::toSManga)
-    }
-
-    // Remove the '#' and map to the url format used on the website.
-    override fun getMangaUrl(manga: SManga): String = baseUrl + manga.url.substring(1)
-
-    override fun getChapterUrl(chapter: SChapter): String = baseUrl + chapter.url.substring(1)
 
     override suspend fun getPageList(chapter: SChapter): List<Page> {
         val chapterId = chapter.url.substringAfterLast("/")
         val result = client.get(mangaViewerUrl(chapterId)).parseAsProto<MangaPlusResponse>()
 
-        val viewer = result.successOrThrow { error ->
+        val viewer = result.successOrThrow { popup ->
             when {
-                error?.subject == NOT_FOUND_SUBJECT -> intl["chapter_expired"]
-                !error?.body.isNullOrEmpty() -> error.body
-                else -> intl["unknown_error"]
+                popup?.subject == NOT_FOUND_SUBJECT -> "This chapter has expired"
+                !popup?.body.isNullOrEmpty() -> popup.body
+                else -> "Unknown error"
             }
         }.mangaViewer!!
-
-        val viewToken = viewer.viewToken.orEmpty()
 
         return viewer.pages
             .mapNotNull(MangaPlusPage::mangaPage)
             .mapIndexed { i, page ->
-                val encryptionKey = page.encryptionKey?.let { "#$it" }.orEmpty()
-                Page(i, url = viewToken, imageUrl = page.imageUrl + encryptionKey)
+                Page(
+                    i,
+                    url = viewer.viewToken.orEmpty(),
+                    imageUrl = page.imageUrl + (page.encryptionKey?.let { "#$it" }.orEmpty()),
+                )
             }
     }
 
-    override fun imageRequest(page: Page): Request {
-        val imageHeaders = headersBuilder()
-            .set("Plus-Vw-Token", page.url)
-            .build()
-        return GET(page.imageUrl!!, imageHeaders)
-    }
+    override fun imageRequest(page: Page): Request = Request.Builder()
+        .url(page.imageUrl!!)
+        .headers(headersBuilder().set("Plus-Vw-Token", page.url).build())
+        .get()
+        .build()
 
-    private suspend fun getTitleDetails(titleId: String): TitleDetailView {
+    private suspend fun getTitleDetail(titleId: String): TitleDetailView {
         val result = client.get("$API_URL/title_detailV3?title_id=$titleId&clang=$internalLangName")
             .parseAsProto<MangaPlusResponse>()
 
-        return result.successOrThrow { error ->
+        return result.successOrThrow { popup ->
             when {
-                error?.subject == NOT_FOUND_SUBJECT -> intl["title_removed"]
-                !error?.body.isNullOrEmpty() -> error.body
-                else -> intl["unknown_error"]
+                popup?.subject == NOT_FOUND_SUBJECT -> "This title has been removed"
+                !popup?.body.isNullOrEmpty() -> popup.body
+                else -> "Unknown error"
             }
         }.titleDetailView!!
     }
 
     private suspend fun titleIdFromChapter(chapterId: String): String? {
         val result = client.get(mangaViewerUrl(chapterId)).parseAsProto<MangaPlusResponse>()
-        return result.success?.mangaViewer?.titleId?.toString()
+        return result.success?.mangaViewer?.titleId?.takeIf { it != 0 }?.toString()
     }
 
-    private fun mangaViewerUrl(chapterId: String): HttpUrl = "$API_URL/manga_viewer_v3".toHttpUrl().newBuilder()
+    private fun mangaViewerUrl(chapterId: String): String = "$API_URL/manga_viewer_v3".toHttpUrl().newBuilder()
         .addQueryParameter("chapter_id", chapterId)
-        .addQueryParameter("split", if (preferences.splitImages()) "yes" else "no")
-        .addQueryParameter("img_quality", preferences.imageQuality())
+        .addQueryParameter("split", "no")
+        .addQueryParameter("img_quality", "super_high")
         .addQueryParameter("clang", internalLangName)
-        .build()
+        .toString()
 
     private fun allTitlesV3Url(type: String): String = "$API_URL/title_list/all_v3?type=$type&lang=$internalLangName&clang=$internalLangName"
 
     private fun List<Title>.filterByLang(): List<Title> = filter { it.titleId != 0 && it.language == internalLangCode }.distinctBy(Title::titleId)
 
     private fun MangaPlusResponse.successOrThrow(
-        errorMessage: (Popup?) -> String = { it?.body?.takeIf(String::isNotEmpty) ?: intl["unknown_error"] },
-    ): SuccessResult = success ?: throw Exception(errorMessage(error?.langPopup(internalLangCode)))
-
-    private fun imageIntercept(chain: Interceptor.Chain): Response {
-        val request = chain.request()
-        val response = chain.proceed(request)
-        val encryptionKey = request.url.fragment
-
-        if (encryptionKey.isNullOrEmpty()) {
-            return response
-        }
-
-        val keyStream = encryptionKey.decodeHex()
-        val contentType = (response.headers["Content-Type"] ?: "image/jpeg").toMediaTypeOrNull()
-        val body = response.body.source()
-
-        val decrypted = object : okio.Source by body {
-            private var index = 0
-            private val buffer = Buffer()
-
-            override fun read(sink: Buffer, byteCount: Long): Long {
-                val read = body.read(buffer, byteCount)
-                if (read == -1L) return -1L
-
-                val bytes = buffer.readByteArray()
-                for (i in bytes.indices) {
-                    bytes[i] = (bytes[i].toInt() xor (keyStream[index++ % keyStream.size].toInt() and 0xFF)).toByte()
-                }
-                sink.write(bytes)
-                return read
-            }
-        }
-
-        return response.newBuilder()
-            .body(
-                decrypted.buffer()
-                    .asResponseBody(contentType, response.body.contentLength()),
-            )
-            .build()
-    }
-
-    // ============================= Preferences ============================
-
-    override fun setupPreferenceScreen(screen: PreferenceScreen) {
-        ListPreference(screen.context).apply {
-            key = "${QUALITY_PREF_KEY}_$lang"
-            title = intl["image_quality"]
-            entries = arrayOf(
-                intl["image_quality_low"],
-                intl["image_quality_medium"],
-                intl["image_quality_high"],
-            )
-            entryValues = QUALITY_PREF_ENTRY_VALUES
-            setDefaultValue(QUALITY_PREF_DEFAULT_VALUE)
-            summary = "%s"
-        }.also(screen::addPreference)
-
-        SwitchPreferenceCompat(screen.context).apply {
-            key = "${SPLIT_PREF_KEY}_$lang"
-            title = intl["split_double_pages"]
-            summary = intl["split_double_pages_summary"]
-            setDefaultValue(SPLIT_PREF_DEFAULT_VALUE)
-        }.also(screen::addPreference)
-
-        SwitchPreferenceCompat(screen.context).apply {
-            key = "${SUBTITLE_ONLY_KEY}_$lang"
-            title = intl["subtitle_only"]
-            summary = intl["subtitle_only_summary"]
-            setDefaultValue(SUBTITLE_ONLY_DEFAULT_VALUE)
-        }.also(screen::addPreference)
-    }
-
-    private fun SharedPreferences.imageQuality(): String = getString("${QUALITY_PREF_KEY}_$lang", QUALITY_PREF_DEFAULT_VALUE)!!
-
-    private fun SharedPreferences.splitImages(): Boolean = getBoolean("${SPLIT_PREF_KEY}_$lang", SPLIT_PREF_DEFAULT_VALUE)
-
-    private fun SharedPreferences.subtitleOnly(): Boolean = getBoolean("${SUBTITLE_ONLY_KEY}_$lang", SUBTITLE_ONLY_DEFAULT_VALUE)
+        errorMessage: (Popup?) -> String = { it?.body?.takeIf(String::isNotEmpty) ?: "Unknown error" },
+    ): SuccessResult = success ?: throw Exception(errorMessage(error?.popupFor(internalLangCode)))
 }
 
 private const val API_URL = "https://jumpg-webapi.tokyo-cdn.com/api"
+private const val NOT_FOUND_SUBJECT = "Not Found"
 
 private val MANGAPLUS_HOSTS = listOf(
     "mangaplus.shueisha.co.jp",
@@ -385,15 +299,3 @@ private val MANGAPLUS_HOSTS = listOf(
     "jumpg-webapi.tokyo-cdn.com",
     "www.jumpg-webapi.tokyo-cdn.com",
 )
-
-private const val QUALITY_PREF_KEY = "imageResolution"
-private val QUALITY_PREF_ENTRY_VALUES = arrayOf("low", "high", "super_high")
-private val QUALITY_PREF_DEFAULT_VALUE = QUALITY_PREF_ENTRY_VALUES[2]
-
-private const val SPLIT_PREF_KEY = "splitImage"
-private const val SPLIT_PREF_DEFAULT_VALUE = true
-
-private const val SUBTITLE_ONLY_KEY = "subtitleOnly"
-private const val SUBTITLE_ONLY_DEFAULT_VALUE = false
-
-private const val NOT_FOUND_SUBJECT = "Not Found"
