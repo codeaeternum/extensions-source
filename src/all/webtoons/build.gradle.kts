@@ -6,7 +6,7 @@ plugins {
 
 keiyoushi {
     name = "Webtoons.com"
-    versionCode = 3
+    versionCode = 13
     contentWarning = ContentWarning.SAFE
     libVersion = "1.6"
 
@@ -33,6 +33,5 @@ keiyoushi {
     }
 }
 
-// ProGuard (createReleaseExtensionJar) rompe con rutas con espacios
-// ("Devin - Sesiones Individuales"): se mueve buildDir fuera del checkout.
-layout.buildDirectory.set(File(System.getProperty("user.home"), ".aeternum-ext-build/${project.path.replace(':', '_')}"))
+// ProGuard (createReleaseExtensionJar) breaks on checkout paths containing spaces.
+layout.buildDirectory.set(file(System.getProperty("user.home") + "/.aeternum-ext-build/${project.path.replace(':', '_')}"))

@@ -6,7 +6,7 @@ plugins {
 
 keiyoushi {
     name = "HentaiMode"
-    versionCode = 2
+    versionCode = 11
     contentWarning = ContentWarning.NSFW
     libVersion = "1.6"
 
@@ -18,9 +18,10 @@ keiyoushi {
     deeplink {
         host("hentaimode.com")
         path("/g/..*")
+        path("/leer/..*")
     }
 }
 
 // ProGuard (createReleaseExtensionJar) rompe con rutas con espacios
 // ("Devin - Sesiones Individuales"): se mueve buildDir fuera del checkout.
-layout.buildDirectory.set(File(System.getProperty("user.home"), ".aeternum-ext-build/${project.path.replace(':', '_')}"))
+layout.buildDirectory.set(file(System.getProperty("user.home") + "/.aeternum-ext-build/${project.path.replace(':', '_')}"))

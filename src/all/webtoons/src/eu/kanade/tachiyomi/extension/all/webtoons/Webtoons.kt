@@ -11,23 +11,24 @@ import keiyoushi.network.get
 import keiyoushi.network.rateLimit
 import keiyoushi.source.KeiSource
 import keiyoushi.utils.asJsoup
+import keiyoushi.utils.firstInstanceOrNull
 import keiyoushi.utils.parseAs
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import kotlinx.serialization.json.JsonElement
 import okhttp3.Headers
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
-import org.jsoup.parser.Parser
 import java.net.SocketException
-import java.text.DecimalFormat
 import java.util.Calendar
 
 @Source
 abstract class Webtoons : KeiSource() {
-    // Due to lang code getting more specific for zh-Hant
+    // URL paths use the lowercase language code
     private val langCode: String get() = if (lang == "zh-Hant") "zh-hant" else lang
     private val localeForCookie: String get() = if (lang == "zh-Hant") "zh_TW" else lang
 
@@ -41,12 +42,13 @@ abstract class Webtoons : KeiSource() {
 
     override val supportRelatedMangasBySearch = true
 
-    // Sin addCookie (CookieManager/android.webkit) ni TextInterceptor (android.graphics):
-    // no existen en el runtime J9 de Tachimanga. La cookie va como header fijo.
+    // android.webkit.CookieManager is not available on every runtime, so the
+    // age-gate and locale cookies are sent as a plain header instead, scoped to
+    // webtoons.com hosts only (the image CDN on pstatic.net must not see them).
     override fun OkHttpClient.Builder.configureClient() = apply {
         addInterceptor { chain ->
             val request = chain.request()
-            val newRequest = if (request.url.host.endsWith("webtoons.com")) {
+            val newRequest = if (request.url.host.isWebtoonsHost()) {
                 request.newBuilder()
                     .header("Cookie", "ageGatePass=true; locale=$localeForCookie; needGDPR=false")
                     .build()
@@ -63,6 +65,8 @@ abstract class Webtoons : KeiSource() {
         rateLimit(1) { it.host == mobileUrl.toHttpUrl().host }
     }
 
+    private fun String.isWebtoonsHost() = this == "webtoons.com" || endsWith(".webtoons.com")
+
     override suspend fun getPopularManga(page: Int): MangasPage {
         val ranking = when (page) {
             1 -> "trending"
@@ -72,8 +76,8 @@ abstract class Webtoons : KeiSource() {
             else -> throw Exception("page > 4 not available")
         }
 
-        val document = client.get("$baseUrl/$langCode/ranking/$ranking").asJsoup()
-        val entries = document.select(".webtoon_list li a")
+        val entries = client.get("$baseUrl/$langCode/ranking/$ranking").asJsoup()
+            .select(".webtoon_list li a")
             .map(::mangaFromElement)
 
         return MangasPage(entries, hasNextPage = ranking != "canvas")
@@ -82,8 +86,18 @@ abstract class Webtoons : KeiSource() {
     private fun mangaFromElement(element: Element): SManga = SManga.create().apply {
         setUrlWithoutDomain(element.absUrl("href"))
         title = element.selectFirst(".title")!!.text()
-        thumbnail_url = element.selectFirst("img")?.absUrl("src")
+        thumbnail_url = element.selectFirst("img")?.absUrl("src")?.fullSizeThumb()
     }
+
+    // pstatic serves a compressed or cropped derivative when ?type= is present;
+    // the bare URL returns the original image
+    private fun String.fullSizeThumb(): String = toHttpUrlOrNull()
+        ?.takeIf { it.host.endsWith(".pstatic.net") }
+        ?.newBuilder()
+        ?.removeAllQueryParameters("type")
+        ?.build()
+        ?.toString()
+        ?: this
 
     override suspend fun getLatestUpdates(page: Int): MangasPage {
         val day = when (Calendar.getInstance().get(Calendar.DAY_OF_WEEK)) {
@@ -97,21 +111,31 @@ abstract class Webtoons : KeiSource() {
             else -> throw Exception("Unknown day of week")
         }
 
-        val document = client.get("$baseUrl/$langCode/originals/$day?sortOrder=UPDATE").asJsoup()
-        val entries = document.select(".webtoon_list li a")
+        // day names stay in English for every language
+        val entries = client.get("$baseUrl/$langCode/originals/$day?sortOrder=UPDATE").asJsoup()
+            .select(".webtoon_list li a")
             .map(::mangaFromElement)
 
         return MangasPage(entries, hasNextPage = false)
     }
 
+    override fun getFilterList(data: JsonElement?): FilterList = FilterList(
+        SearchType(),
+    )
+
     override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
-        // El sitio migró la búsqueda SSR a /search/result
+        val searchType = filters.firstInstanceOrNull<SearchType>()?.selected
+
+        // /search/result is the combined ORIGINALS + CANVAS overview (no
+        // pagination); the typed endpoints paginate at 30 entries per page
         val url = baseUrl.toHttpUrl().newBuilder().apply {
             addPathSegment(langCode)
             addPathSegment("search")
-            addPathSegment("result")
+            addPathSegment(searchType ?: "result")
             addQueryParameter("keyword", query)
-            addQueryParameter("page", page.toString())
+            if (searchType != null) {
+                addQueryParameter("page", page.toString())
+            }
         }.build()
 
         val document = client.get(url).asJsoup()
@@ -122,13 +146,14 @@ abstract class Webtoons : KeiSource() {
     }
 
     override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
-        if (url.host != baseUrl.toHttpUrl().host) return null
-        val titleNo = url.queryParameter("title_no")?.toIntOrNull() ?: return null
+        if (!url.host.isWebtoonsHost()) return null
+        val titleNo = url.queryParameter("title_no")?.toIntOrNull()
+            ?: url.queryParameter("titleNo")?.toIntOrNull()
+            ?: return null
         val path = url.pathSegments
-        if (path.size < 3) return null
 
         // Every language ships as its own source; only the matching one resolves the link.
-        if (path[0] != langCode) return null
+        if (path.size < 3 || path[0] != langCode) return null
 
         val manga = SManga.create().apply {
             this.url = buildString {
@@ -170,12 +195,12 @@ abstract class Webtoons : KeiSource() {
                 ?: detailElement?.selectFirst(".author_area")?.ownText() ?: author
             genre = detailElement?.select(".genre").orEmpty().joinToString { it.text() }
             description = infoElement?.selectFirst("p.summary")?.text()
-            status = with(infoElement?.selectFirst("p.day_info")?.text().orEmpty()) {
-                when {
-                    contains("UP") || contains("EVERY") || contains("NOUVEAU") -> SManga.ONGOING
-                    contains("END") || contains("COMPLETED") || contains("TERMINÉ") -> SManga.COMPLETED
-                    else -> SManga.UNKNOWN
-                }
+            // day_info text is localized ("COMPLETED", "FINALIZADAS",
+            // "ABGESCHLOSSEN", ...); the icon class is locale-independent
+            status = when {
+                infoElement?.selectFirst("p.day_info .txt_ico_completed") != null -> SManga.COMPLETED
+                infoElement?.selectFirst("p.day_info .txt_ico_up") != null -> SManga.ONGOING
+                else -> SManga.UNKNOWN
             }
             thumbnail_url = run {
                 val bannerFile = document.selectFirst(".detail_header .thmb img")
@@ -189,6 +214,7 @@ abstract class Webtoons : KeiSource() {
                     ?.lastOrNull()
                 val thumbnail = document.selectFirst("head meta[property=\"og:image\"]")
                     ?.attr("content")
+                    ?.fullSizeThumb()
 
                 // replace banner image for toons in library
                 if (oldThumbFile != null && oldThumbFile != bannerFile) {
@@ -241,116 +267,87 @@ abstract class Webtoons : KeiSource() {
             }
         }.build()
 
-        val result = client.get(url, mobileHeaders).parseAs<EpisodeListResponse>()
+        val episodes = client.get(url, mobileHeaders)
+            .parseAs<EpisodeListResponse>()
+            .result
+            .episodeList
+            .onEach(::assignEpisodeNumber)
 
-        var recognized = 0
-        var unrecognized = 0
-
-        val chapters = result.result.episodeList.onEach { episode ->
-            val match = episodeNoRegex
-                .find(episode.episodeTitle)
-                ?.groupValues
-                ?.takeIf { it[6].isEmpty() } // skip mini/bonus episodes
-
-            episode.chapterNumber = match?.get(11)?.toFloat() ?: -1f
-            episode.seasonNumber = match?.get(4)?.takeIf(String::isNotBlank)?.toInt() ?: 1
-
-            if (episode.chapterNumber == -1f) {
-                unrecognized++
-            } else {
-                recognized++
-            }
-        }
-
-        if (unrecognized > recognized) {
-            chapters.onEachIndexed { index, chapter ->
-                chapter.chapterNumber = (index + 1).toFloat()
+        if (episodes.count { it.chapterNumber == -1f } > episodes.size / 2) {
+            // most titles follow the "Ep. N" naming convention; when the
+            // majority of titles do not match, fall back to sequential numbers
+            episodes.forEachIndexed { index, episode ->
+                episode.chapterNumber = (index + 1).toFloat()
             }
         } else {
             var maxChapterNumber = 0f
             var currentSeason = 1
             var seasonOffset = 0f
 
-            chapters.forEachIndexed { idx, chapter ->
-                if (chapter.chapterNumber != -1f) {
-                    val originalNumber = chapter.chapterNumber
+            episodes.forEachIndexed { index, episode ->
+                if (episode.chapterNumber != -1f) {
+                    val originalNumber = episode.chapterNumber
 
-                    // Check if we've moved to a new season
-                    if (chapter.seasonNumber > currentSeason) {
-                        currentSeason = chapter.seasonNumber
+                    if (episode.seasonNumber > currentSeason) {
+                        currentSeason = episode.seasonNumber
                         if (originalNumber <= maxChapterNumber) {
                             seasonOffset = maxChapterNumber
                         }
                     }
 
-                    chapter.chapterNumber = seasonOffset + originalNumber
-                    maxChapterNumber = maxOf(maxChapterNumber, chapter.chapterNumber)
+                    episode.chapterNumber = seasonOffset + originalNumber
+                    maxChapterNumber = maxOf(maxChapterNumber, episode.chapterNumber)
                 } else {
-                    val previous = chapters.getOrNull(idx - 1)
-                    if (previous == null) {
-                        chapter.chapterNumber = 0f
-                    } else {
-                        chapter.chapterNumber = previous.chapterNumber + 0.01f
-                    }
+                    val previous = episodes.getOrNull(index - 1)
+                    episode.chapterNumber = previous?.let { it.chapterNumber + 0.01f } ?: 0f
                 }
             }
         }
 
-        val numberFormatter = DecimalFormat("#.##")
-        return chapters.map { episode ->
-            SChapter.create().apply {
-                this.url = episode.viewerLink
-                name = buildString {
-                    append(Parser.unescapeEntities(episode.episodeTitle, false))
-                    append(" (ch. ", numberFormatter.format(episode.chapterNumber), ")")
-                    if (episode.hasBgm) {
-                        append(" ♫")
-                    }
-                }
-                date_upload = episode.exposureDateMillis
-                chapter_number = episode.chapterNumber
-            }
-        }.asReversed()
+        return episodes.map { it.toSChapter() }.asReversed()
     }
 
-    // season number - 4 capture group
-    // possible bonus/mini/special episode - 6 capture group
-    // episode number - 11 capture group
-    private val episodeNoRegex = Regex(
-        """(?:(s(eason)?|saison|part|vol(ume)?)\s*\.?\s*(\d+).*?)?(.*?(mini|bonus|special).*?)?(e(p(isode)?)?|ch(apter)?)\s*\.?\s*(\d+(\.\d+)?)""",
-        RegexOption.IGNORE_CASE,
-    )
+    private fun assignEpisodeNumber(episode: Episode) {
+        val match = EPISODE_NUMBER_REGEX.find(episode.episodeTitle)
+            ?.groupValues
+            ?.takeIf { it[6].isEmpty() } // skip mini/bonus/special episodes
+
+        episode.chapterNumber = match?.get(11)?.toFloat() ?: -1f
+        episode.seasonNumber = match?.get(4)?.takeIf(String::isNotBlank)?.toInt() ?: 1
+    }
 
     override suspend fun getPageList(chapter: SChapter): List<Page> {
         val document = client.get(getChapterUrl(chapter)).asJsoup()
 
         val pages = document.select("div#_imageList > img").mapIndexed { i, element ->
             Page(i, imageUrl = element.attr("data-url"))
-        }.toMutableList()
-
-        if (pages.isEmpty()) {
-            pages.addAll(
-                fetchMotionToonPages(document),
-            )
         }
 
-        return pages
+        if (pages.isNotEmpty()) {
+            return pages
+        }
+
+        return fetchMotionToonPages(document)
     }
 
     private suspend fun fetchMotionToonPages(document: Document): List<Page> {
         val docString = document.toString()
+        val docUrl = DOC_URL_REGEX.find(docString)!!.groupValues[1]
+        val motionToonPath = MOTION_TOON_PATH_REGEX.find(docString)!!.groupValues[1]
 
-        val docUrlRegex = Regex("documentURL:.*?'(.*?)'")
-        val motionToonPathRegex = Regex("jpg:.*?'(.*?)\\{")
+        return client.get(docUrl).parseAs<MotionToonResponse>()
+            .imageUrls()
+            .mapIndexed { i, url -> Page(i, imageUrl = motionToonPath + url) }
+    }
 
-        val docUrl = docUrlRegex.find(docString)!!.groupValues[1]
-        val motionToonPath = motionToonPathRegex.find(docString)!!.groupValues[1]
-        val motionToonImages = client.get(docUrl).parseAs<MotionToonResponse>().assets.images
+    companion object {
+        // group 4: season number, group 6: mini/bonus/special marker, group 11: episode number
+        private val EPISODE_NUMBER_REGEX = Regex(
+            """(?:(s(eason)?|saison|part|vol(ume)?)\s*\.?\s*(\d+).*?)?(.*?(mini|bonus|special).*?)?(e(p(isode)?)?|ch(apter)?)\s*\.?\s*(\d+(\.\d+)?)""",
+            RegexOption.IGNORE_CASE,
+        )
 
-        return motionToonImages.entries
-            .filter { it.key.contains("layer") }
-            .mapIndexed { i, entry ->
-                Page(i, imageUrl = motionToonPath + entry.value)
-            }
+        private val DOC_URL_REGEX = Regex("documentURL:.*?'(.*?)'")
+        private val MOTION_TOON_PATH_REGEX = Regex("jpg:.*?'(.*?)\\{")
     }
 }

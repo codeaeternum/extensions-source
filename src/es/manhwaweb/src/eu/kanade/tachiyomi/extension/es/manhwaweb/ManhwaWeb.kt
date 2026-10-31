@@ -9,43 +9,45 @@ import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
 import keiyoushi.network.get
+import keiyoushi.network.rateLimit
 import keiyoushi.source.KeiSource
 import keiyoushi.utils.parseAs
 import kotlinx.serialization.json.JsonElement
-import okhttp3.Headers
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import kotlin.time.Duration.Companion.seconds
 
 @Source
 abstract class ManhwaWeb : KeiSource() {
 
-    private val apiUrl = "https://manhwawebbackend-production.up.railway.app"
+    private val apiUrl = "https://api.manhwaweb.com"
 
-    override fun Headers.Builder.configureHeaders() = add("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/png,image/svg+xml,*/*;q=0.8")
+    override fun OkHttpClient.Builder.configureClient() = rateLimit(2, 1.seconds)
 
     override suspend fun getPopularManga(page: Int): MangasPage {
-        val result = client.get("$apiUrl/manhwa/nuevos").parseAs<PayloadPopularDto>()
-        val mangas = (result.data.weekly + result.data.total)
-            .distinctBy { it.slug }
-            .sortedByDescending { it.views }
-            .map { it.toSManga() }
-
-        return MangasPage(mangas, false)
+        val result = client.get("$apiUrl/manhwa/nuevos").parseAs<PopularPayloadDto>()
+        return MangasPage(result.toSMangaList(), hasNextPage = false)
     }
 
     override suspend fun getLatestUpdates(page: Int): MangasPage {
-        val result = client.get("$apiUrl/latest/new-manhwa").parseAs<PayloadLatestDto>()
-        val mangas = (result.data.esp + result.data.raw18 + result.data.esp18)
-            .distinctBy { it.slug }
-            .sortedByDescending { it.latestChapterDate }
-            .map { it.toSManga() }
-
-        return MangasPage(mangas, false)
+        val result = client.get("$apiUrl/latest/new-manhwa").parseAs<LatestPayloadDto>()
+        return MangasPage(result.toSMangaList(), hasNextPage = false)
     }
 
     override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
         if (url.host != baseUrl.toHttpUrl().host) return null
-        val slug = url.pathSegments.lastOrNull { it.isNotEmpty() } ?: return null
+        val segments = url.pathSegments.filter { it.isNotEmpty() }
+        if (segments.size != 2) return null
+        val slug = when (segments[0]) {
+            "manhwa", "manga" -> segments[1]
+            // Reader URLs carry the chapter id; the chapter payload holds the
+            // manga's slug.
+            "leer" -> client.get("$apiUrl/chapters/see/${segments[1]}")
+                .parseAs<PagesPayloadDto>().mangaSlug
+            else -> null
+        } ?: return null
         return getDetailsBySlug(slug).toSManga()
     }
 
@@ -55,42 +57,30 @@ abstract class ManhwaWeb : KeiSource() {
 
         filters.forEach { filter ->
             when (filter) {
-                is TypeFilter -> url.addQueryParameter("tipo", filter.toUriPart())
+                is QueryFilter -> url.addQueryParameter(filter.param, filter.selected)
 
-                is DemographyFilter -> url.addQueryParameter("demografia", filter.toUriPart())
-
-                is StatusFilter -> url.addQueryParameter("estado", filter.toUriPart())
-
-                is EroticFilter -> url.addQueryParameter("erotico", filter.toUriPart())
-
-                is GenreFilter -> {
-                    val genres = filter.state
-                        .filter { it.state }
-                        .joinToString("a") { it.id.toString() }
-                    url.addQueryParameter("generes", genres)
-                }
+                is GenreFilter -> url.addQueryParameter(
+                    "generes",
+                    filter.state.filter { it.state }.joinToString("a") { it.id.toString() },
+                )
 
                 is SortByFilter -> {
+                    url.addQueryParameter("order_item", filter.selected)
                     url.addQueryParameter(
                         "order_dir",
-                        if (filter.state!!.ascending) "asc" else "desc",
+                        if (filter.state?.ascending == true) "asc" else "desc",
                     )
-                    url.addQueryParameter("order_item", filter.selected)
                 }
 
                 else -> {}
             }
         }
 
-        url.addQueryParameter("page", (page - 1).toString())
+        val result = client.get(url.addQueryParameter("page", (page - 1).toString()).build())
+            .parseAs<LibraryPayloadDto>()
 
-        val response = client.get(url.build())
-        val result = response.parseAs<PayloadSearchDto>()
-        val mangas = result.data.map { it.toSManga() }
-        return MangasPage(mangas, result.hasNextPage)
+        return MangasPage(result.toSMangaList(), result.hasNextPage)
     }
-
-    override fun getMangaUrl(manga: SManga): String = "$baseUrl/${manga.url}"
 
     override suspend fun fetchMangaUpdate(
         manga: SManga,
@@ -98,37 +88,36 @@ abstract class ManhwaWeb : KeiSource() {
         fetchDetails: Boolean,
         fetchChapters: Boolean,
     ): SMangaUpdate {
-        val slug = manga.url.removeSuffix("/").substringAfterLast("/")
-        val dto = getDetailsBySlug(slug)
-
-        return SMangaUpdate(dto.toSManga(), parseChapterList(dto))
-    }
-
-    private suspend fun getDetailsBySlug(slug: String) = client.get("$apiUrl/manhwa/see/$slug").parseAs<ComicDetailsDto>()
-
-    private fun parseChapterList(comic: ComicDetailsDto) = comic.chapters.filterNot {
-        it.createdAt == null || (it.espUrl == null && it.rawUrl == null)
-    }.map { it.toSChapter(comic.id, comic.slug) }
-        .sortedByDescending { it.chapter_number }
-
-    private fun ChapterDto.toSChapter(id: String, realId: String) = SChapter.create().apply {
-        name = "Capítulo ${number.toString().removeSuffix(".0")}"
-        chapter_number = number
-        date_upload = createdAt ?: 0
-        val url = (espUrl ?: rawUrl!!).replace(id, realId)
-        setUrlWithoutDomain(url)
-        scanlator = if (espUrl != null) "Esp" else "Raw"
+        val dto = getDetailsBySlug(manga.url.substringAfterLast("/"))
+        return SMangaUpdate(
+            manga = if (fetchDetails) dto.toSManga() else manga,
+            chapters = if (fetchChapters) dto.toChapterList() else chapters,
+        )
     }
 
     override suspend fun getPageList(chapter: SChapter): List<Page> {
-        val slug = chapter.url.removeSuffix("/").substringAfterLast("/")
+        val result = client.get("$apiUrl/chapters/see/${chapter.url.substringAfterLast("/")}")
+            .parseAs<PagesPayloadDto>()
 
-        val response = client.get("$apiUrl/chapters/see/$slug")
-
-        val result = response.parseAs<PayloadPageDto>()
-        return result.data.images.filter { it.startsWith("http") }
-            .mapIndexed { i, img -> Page(i, imageUrl = img) }
+        return result.images
+            .filter { it.startsWith("http") }
+            .mapIndexed { index, image -> Page(index, imageUrl = image) }
     }
+
+    // imgNmw.xyz hosts reject image requests without the site's Referer, while
+    // the site marks every other image host as no-referrer.
+    override fun imageRequest(page: Page): Request {
+        val url = page.imageUrl!!.toHttpUrl()
+        if (url.host.endsWith("mw.xyz")) return super.imageRequest(page)
+
+        return Request.Builder()
+            .url(url)
+            .headers(headers.newBuilder().removeAll("Referer").removeAll("Origin").build())
+            .get()
+            .build()
+    }
+
+    private suspend fun getDetailsBySlug(slug: String) = client.get("$apiUrl/manhwa/see/$slug").parseAs<ComicDetailsDto>()
 
     override fun getFilterList(data: JsonElement?): FilterList = FilterList(
         TypeFilter(),
@@ -136,8 +125,8 @@ abstract class ManhwaWeb : KeiSource() {
         StatusFilter(),
         EroticFilter(),
         Filter.Separator(),
-        GenreFilter("Géneros", getGenres()),
+        GenreFilter(),
         Filter.Separator(),
-        SortByFilter("Ordenar por", getSortProperties()),
+        SortByFilter(),
     )
 }

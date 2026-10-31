@@ -6,7 +6,7 @@ plugins {
 
 keiyoushi {
     name = "LeerCapitulo"
-    versionCode = 2
+    versionCode = 11
     contentWarning = ContentWarning.SAFE
     libVersion = "1.6"
 
@@ -17,6 +17,7 @@ keiyoushi {
 
     deeplink {
         path("/manga/..*")
+        path("/leer/..*")
     }
 }
 

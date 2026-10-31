@@ -14,210 +14,115 @@ import keiyoushi.source.KeiSource
 import keiyoushi.utils.asJsoup
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.toJsonRequestBody
-import keiyoushi.utils.tryParseDate
-import okhttp3.Interceptor
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import okhttp3.HttpUrl
 import okhttp3.OkHttpClient
-import okhttp3.Response
-import org.jsoup.Jsoup
-import org.jsoup.nodes.Document
-import java.time.format.DateTimeFormatter
-import java.util.Locale
 
 @Source
 abstract class NovelCool : KeiSource() {
 
-    private val siteLang: String get() = if (lang == "pt-BR") "br" else lang
-
     private val apiUrl = "https://api.novelcool.com"
+    private val apiLang: String get() = if (lang == "pt-BR") "br" else lang
 
     override fun OkHttpClient.Builder.configureClient() = rateLimit(1)
 
-    private val pageClient by lazy {
-        client.newBuilder()
-            .addInterceptor(::jsRedirect)
-            .build()
+    override suspend fun getPopularManga(page: Int): MangasPage = fetchBookList("$apiUrl/elite/hot/", page)
+
+    override suspend fun getLatestUpdates(page: Int): MangasPage = fetchBookList("$apiUrl/elite/latest/", page)
+
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage = fetchBookList("$apiUrl/book/search/", page, query.trim())
+
+    private suspend fun fetchBookList(url: String, page: Int, keyword: String? = null): MangasPage {
+        val payload = BrowsePayload(
+            appId = APP_ID,
+            secret = APP_SECRET,
+            lang = apiLang,
+            lcType = "manga",
+            page = page.toString(),
+            pageSize = PAGE_SIZE.toString(),
+            keyword = keyword?.takeUnless { it.isEmpty() },
+        )
+
+        val list = client.post(url, payload.toJsonRequestBody()).parseAs<MangaListResponse>().list
+        val entries = list.filterNot(MangaDto::isTextNovel).map { it.toSManga() }
+        return MangasPage(entries, hasNextPage = list.size == PAGE_SIZE)
     }
 
-    override suspend fun getPopularManga(page: Int): MangasPage = commonApiRequest("$apiUrl/elite/hot/", page)
-
-    override suspend fun getLatestUpdates(page: Int): MangasPage = commonApiRequest("$apiUrl/elite/latest/", page)
-
-    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage = commonApiRequest("$apiUrl/book/search/", page, query)
-
+    // Manga details and the chapter list are separate API endpoints, so honor the
+    // flags and fetch them concurrently when both are needed.
     override suspend fun fetchMangaUpdate(
         manga: SManga,
         chapters: List<SChapter>,
         fetchDetails: Boolean,
         fetchChapters: Boolean,
-    ): SMangaUpdate {
-        val document = client.get(getMangaUrl(manga)).asJsoup()
+    ): SMangaUpdate = coroutineScope {
+        val bookId = manga.url.substringBefore('/')
+        val infoAsync = async { if (fetchDetails) fetchBookInfo(bookId) else null }
+        val chaptersAsync = async { if (fetchChapters) fetchChapterList(bookId) else chapters }
 
-        val details = SManga.create().apply {
-            url = manga.url
-            title = document.selectFirst("h1.bookinfo-title")!!.text()
-            description = document.selectFirst("div.bk-summary-txt")?.text()
-            genre = document.select(".bookinfo-category-list a").joinToString { it.text() }
-            author = document.selectFirst(".bookinfo-author > a")?.attr("title")
-            thumbnail_url = document.selectFirst(".bookinfo-pic-img")?.attr("abs:src")
-            status = document.select(".bookinfo-category-list a").first()?.text().parseStatus()
-        }
-
-        val chapterList = document.select(".chapter-item-list a").map { element ->
-            SChapter.create().apply {
-                setUrlWithoutDomain(element.attr("href"))
-                name = element.attr("title")
-                date_upload = DATE_FORMATTER.tryParseDate(element.select(".chapter-item-time").text())
-            }
-        }
-
-        return SMangaUpdate(details, chapterList)
-    }
-
-    private fun String?.parseStatus(): Int {
-        this ?: return SManga.UNKNOWN
-        return when {
-            this.lowercase() in completedStatusList -> SManga.COMPLETED
-            this.lowercase() in ongoingStatusList -> SManga.ONGOING
-            else -> SManga.UNKNOWN
-        }
-    }
-
-    override suspend fun getPageList(chapter: SChapter): List<Page> {
-        var doc = pageClient.get(getChapterUrl(chapter)).asJsoup()
-
-        // Chapter pages redirect (HTTP 302) to an intermediate "choose a source" page on a
-        // partner domain (e.g. techsmartideas.com). That page contains a.vision-button links
-        // which point to the actual image server (e.g. financemasterpro.com). This is the
-        // same shared infrastructure used by NineAnime.
-        val serverUrl = doc.selectFirst("a.vision-button")?.attr("abs:href")
-
-        if (serverUrl != null) {
-            val serverHeaders = headers.newBuilder()
-                .set("Referer", doc.baseUri())
-                .build()
-            doc = pageClient.get(serverUrl, serverHeaders).asJsoup()
-        }
-
-        // Parse all_imgs_url from the script using a robust approach: extract the array
-        // content as a string and then find all quoted http URLs within it. This avoids
-        // fragile JSON parsing and trailing-comma issues in the original JS array.
-        val scriptData = doc.select("script:containsData(all_imgs_url)").firstOrNull()?.data()
-
-        if (scriptData != null) {
-            val arrayContent = scriptData
-                .substringAfter("all_imgs_url: [")
-                .substringBefore("]")
-            val images = imageUrlRegex.findAll(arrayContent)
-                .map { it.groupValues[1].replace("\\/", "/") }
-                .toList()
-
-            if (images.isNotEmpty()) {
-                return images.mapIndexed { idx, img -> Page(idx, imageUrl = img) }
-            }
-        }
-
-        return singlePageParse(doc)
-    }
-
-    private fun singlePageParse(document: Document): List<Page> = document.selectFirst(".mangaread-pagenav > .sl-page")?.select("option")
-        ?.mapIndexed { idx, page ->
-            Page(idx, url = page.attr("value"))
-        } ?: emptyList()
-
-    override suspend fun getImageUrl(page: Page): String {
-        val document = client.get(page.url).asJsoup()
-        return document.select(".mangaread-manga-pic").attr("src")
-    }
-
-    private fun jsRedirect(chain: Interceptor.Chain): Response {
-        val request = chain.request()
-        val headers = request.headers.newBuilder()
-            .removeAll("Accept-Encoding")
-            .build()
-        val response = chain.proceed(request.newBuilder().headers(headers).build())
-
-        if (response.header("Content-Type")?.contains("text/html") != true) {
-            return response
-        }
-
-        val responseBody = response.peekBody(Long.MAX_VALUE).string()
-        val document = Jsoup.parse(responseBody)
-        val script = document.selectFirst("script:containsData(window.location.href)")?.html()
-            ?: return response
-
-        val jsRedirect = JS_REDIRECT_REGEX.find(script)?.groupValues?.get(1)
-            ?: return response
-
-        val requestUrl = response.request.url
-
-        val url = requestUrl.resolve(jsRedirect)
-            ?: return response
-
-        response.close()
-
-        val newHeaders = request.headers.newBuilder()
-            .set("Referer", requestUrl.toString())
-            .build()
-
-        return chain.proceed(
-            request.newBuilder()
-                .url(url)
-                .headers(newHeaders)
-                .build(),
+        val info = infoAsync.await()
+        SMangaUpdate(
+            manga = info?.toSManga() ?: manga,
+            // a text-first book is a novel mislabeled as manga; its image
+            // chapters (if any) are stray extras, not a real chapter list
+            chapters = if (info?.isTextNovel == true) emptyList() else chaptersAsync.await(),
         )
     }
 
-    private suspend fun commonApiRequest(url: String, page: Int, query: String? = null): MangasPage {
-        val payload = NovelCoolBrowsePayload(
-            appId = APP_ID,
-            lang = siteLang,
-            query = query,
-            type = "manga",
-            page = page.toString(),
-            size = SIZE.toString(),
-            secret = APP_SECRET,
-        )
+    private suspend fun fetchBookInfo(bookId: String): BookInfoDto = client.post(
+        "$apiUrl/book/info/",
+        BookPayload(APP_ID, APP_SECRET, apiLang, bookId).toJsonRequestBody(),
+    ).parseAs<BookInfoResponse>().info
 
-        val browse = client.post(url, payload.toJsonRequestBody()).parseAs<NovelCoolBrowseResponse>()
-        val mangas = browse.list?.map {
-            it.toSManga().apply {
-                setUrlWithoutDomain(it.url)
-            }
-        }.orEmpty()
+    private suspend fun fetchChapterList(bookId: String): List<SChapter> = client.post(
+        "$apiUrl/chapter/book_list/",
+        BookPayload(APP_ID, APP_SECRET, apiLang, bookId).toJsonRequestBody(),
+    ).parseAs<ChapterListResponse>().list
+        .filter { it.isReadable }
+        .map { it.toSChapter() }
 
-        return MangasPage(mangas, browse.list?.size == SIZE)
+    override suspend fun getPageList(chapter: SChapter): List<Page> = client.post(
+        "$apiUrl/chapter/info/",
+        ChapterPayload(APP_ID, APP_SECRET, apiLang, chapter.url).toJsonRequestBody(),
+    ).parseAs<ChapterInfoResponse>().info.toPageList()
+
+    // SManga.url is "<book_id>/<visit_path>"; the site's manga pages require the real slug.
+    override fun getMangaUrl(manga: SManga): String = "$baseUrl/novel/${manga.url.substringAfter('/')}.html"
+
+    // Chapter reader pages resolve on the trailing numeric id; the slug segment can be anything.
+    override fun getChapterUrl(chapter: SChapter): String = "$baseUrl/chapter/x/${chapter.url}/"
+
+    override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
+        if (!url.host.endsWith("novelcool.com")) return null
+        val path = url.pathSegments
+        val bookId = when {
+            // /chapter/<slug>/<chapter_id>.html - the site also accepts a trailing slash form
+            path.size == 3 && path[0] == "chapter" -> runCatching {
+                chapterInfo(path[2].substringBeforeLast('.')).bookId
+            }.getOrNull()
+            // /novel/<slug>.html - the book id only exists in the page markup
+            path.size == 2 && path[0] == "novel" -> fetchBookId(url)
+            else -> null
+        } ?: return null
+
+        val info = runCatching { fetchBookInfo(bookId) }.getOrNull()
+        return info?.takeUnless { it.isTextNovel }?.toSManga()
     }
+
+    private suspend fun chapterInfo(chapterId: String): ChapterInfoDto = client.post(
+        "$apiUrl/chapter/info/",
+        ChapterPayload(APP_ID, APP_SECRET, apiLang, chapterId).toJsonRequestBody(),
+    ).parseAs<ChapterInfoResponse>().info
+
+    private suspend fun fetchBookId(url: HttpUrl): String? = client.get(url).asJsoup()
+        .selectFirst(".book-follow-trigger")
+        ?.attr("book_id")
+        ?.takeUnless { it.isEmpty() }
 
     companion object {
         private const val APP_ID = "202201290625004"
         private const val APP_SECRET = "c73a8590641781f203660afca1d37ada"
-        private const val SIZE = 20
-
-        private val DATE_FORMATTER = DateTimeFormatter.ofPattern("MMM d, yyyy", Locale.ENGLISH)
-
-        // Matches any http/https URL inside single or double quotes within the all_imgs_url array.
-        // Using the same approach as NineAnime which shares the same image-serving infrastructure.
-        private val imageUrlRegex = Regex("""["'](https?://[^"']+)["']""")
-
-        private val JS_REDIRECT_REGEX = Regex("""window\.location\.href\s*=\s*["']([^"']+)["']""")
-
-        // copied from Madara
-        private val completedStatusList: Array<String> = arrayOf(
-            "completed",
-            "completo",
-            "completado",
-            "concluído",
-            "concluido",
-            "finalizado",
-            "terminé",
-            "hoàn thành",
-        )
-
-        private val ongoingStatusList: Array<String> = arrayOf(
-            "ongoing", "Продолжается", "updating", "em lançamento", "em lançamento", "em andamento",
-            "em andamento", "en cours", "ativo", "lançando", "Đang Tiến Hành", "devam ediyor",
-            "devam ediyor", "in corso", "in arrivo", "en curso", "en curso", "emision",
-            "curso", "en marcha", "Publicandose", "en emision",
-        )
+        private const val PAGE_SIZE = 20
     }
 }

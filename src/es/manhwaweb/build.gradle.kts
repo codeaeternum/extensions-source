@@ -6,7 +6,7 @@ plugins {
 
 keiyoushi {
     name = "ManhwaWeb"
-    versionCode = 15
+    versionCode = 25
     contentWarning = ContentWarning.MIXED
     libVersion = "1.6"
 
@@ -17,9 +17,11 @@ keiyoushi {
 
     deeplink {
         path("/manhwa/..*")
+        path("/manga/..*")
+        path("/leer/..*")
     }
 }
 
-// ProGuard (createReleaseExtensionJar) rompe con rutas con espacios
-// ("Devin - Sesiones Individuales"): se mueve buildDir fuera del checkout.
-layout.buildDirectory.set(File(System.getProperty("user.home"), ".aeternum-ext-build/${project.path.replace(':', '_')}"))
+// ProGuard (createReleaseExtensionJar) fails on paths with spaces
+// ("Devin - Sesiones Individuales"), so build outside the checkout.
+layout.buildDirectory.set(file(System.getProperty("user.home") + "/.aeternum-ext-build/${project.path.replace(':', '_')}"))

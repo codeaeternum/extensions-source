@@ -1,143 +1,233 @@
 package eu.kanade.tachiyomi.extension.es.manhwaweb
 
+import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
 @Serializable
-class PayloadPopularDto(
-    @SerialName("top") val data: PopularDto,
-)
+class PopularPayloadDto(
+    @SerialName("top") private val top: PopularTopDto? = null,
+) {
+    fun toSMangaList(): List<SManga> = top?.toSMangaList().orEmpty()
+}
 
 @Serializable
-class PopularDto(
-    @SerialName("manhwas_esp") val weekly: List<PopularComicDto>,
-    @SerialName("manhwas_raw") val total: List<PopularComicDto>,
-)
+class PopularTopDto(
+    @SerialName("manhwas_esp") private val esp: List<PopularComicDto> = emptyList(),
+    @SerialName("manhwas_raw") private val raw: List<PopularComicDto> = emptyList(),
+) {
+    fun toSMangaList(): List<SManga> = (esp + raw)
+        .distinctBy { it.slug }
+        .sortedByDescending { it.views }
+        .mapNotNull { it.toSManga() }
+}
 
 @Serializable
 class PopularComicDto(
-    @SerialName("link") val slug: String,
-    @SerialName("numero") val views: Int,
-    private val name: String,
-    @SerialName("imagen") private val thumbnail: String,
+    @SerialName("link") private val link: String? = null,
+    @SerialName("numero") val views: Int = 0,
+    @SerialName("name") private val title: String? = null,
+    @SerialName("imagen") private val thumbnail: String? = null,
 ) {
-    fun toSManga() = SManga.create().apply {
-        title = name
-        thumbnail_url = thumbnail
-        url = slug.removePrefix("/").replace("manga/", "manhwa/")
+    val slug get() = link?.substringAfterLast("/")
+
+    fun toSManga(): SManga? {
+        val slug = slug ?: return null
+        return SManga.create().apply {
+            url = "/manhwa/$slug"
+            title = this@PopularComicDto.title ?: slug
+            thumbnail_url = thumbnail
+        }
     }
 }
 
 @Serializable
-class PayloadLatestDto(
-    @SerialName("manhwas") val data: LatestDto,
-)
+class LatestPayloadDto(
+    @SerialName("manhwas") private val manhwas: LatestDto? = null,
+) {
+    fun toSMangaList(): List<SManga> = manhwas?.toSMangaList().orEmpty()
+}
 
 @Serializable
 class LatestDto(
-    @SerialName("manhwas_esp") val esp: List<LatestComicDto>,
-    @SerialName("manhwas_raw") val raw18: List<LatestComicDto>,
-    @SerialName("_manhwas") val esp18: List<LatestComicDto>,
-)
+    @SerialName("manhwas_esp") private val esp: List<LatestComicDto> = emptyList(),
+    @SerialName("manhwas_raw") private val raw: List<LatestComicDto> = emptyList(),
+    @SerialName("_manhwas") private val adult: List<LatestComicDto> = emptyList(),
+) {
+    fun toSMangaList(): List<SManga> = (esp + raw + adult)
+        .distinctBy { it.slug }
+        .sortedByDescending { it.updatedAt }
+        .mapNotNull { it.toSManga() }
+}
 
 @Serializable
 class LatestComicDto(
-    @SerialName("create") val latestChapterDate: Long,
-    @SerialName("id_rel") val slug: String,
-    @SerialName("name_manhwa") private val name: String,
-    @SerialName("img") private val thumbnail: String,
+    @SerialName("id_rel") private val idRel: String? = null,
+    @SerialName("id_manhwa") private val id: String? = null,
+    @SerialName("name_manhwa") private val title: String? = null,
+    @SerialName("img") private val thumbnail: String? = null,
+    @SerialName("create") val updatedAt: Long = 0,
 ) {
-    fun toSManga() = SManga.create().apply {
-        title = name
-        thumbnail_url = thumbnail
-        url = "manhwa/$slug"
+    val slug get() = idRel ?: id
+
+    fun toSManga(): SManga? {
+        val slug = slug ?: return null
+        return SManga.create().apply {
+            url = "/manhwa/$slug"
+            title = this@LatestComicDto.title ?: slug
+            thumbnail_url = thumbnail
+        }
     }
 }
 
 @Serializable
-class PayloadSearchDto(
-    val data: List<SearchComicDto>,
-    @SerialName("next") val hasNextPage: Boolean,
-)
+class LibraryPayloadDto(
+    @SerialName("data") private val data: List<SearchComicDto> = emptyList(),
+    @SerialName("next") val hasNextPage: Boolean = false,
+) {
+    fun toSMangaList(): List<SManga> = data.mapNotNull { it.toSManga() }
+}
 
 @Serializable
 class SearchComicDto(
-    @SerialName("real_id") val slug: String,
-    @SerialName("the_real_name") private val name: String,
-    @SerialName("_imagen") private val thumbnail: String,
+    @SerialName("real_id") private val realId: String? = null,
+    @SerialName("_id") private val id: String? = null,
+    @SerialName("the_real_name") private val title: String? = null,
+    @SerialName("name_esp") private val altTitle: String? = null,
+    @SerialName("_imagen") private val thumbnail: String? = null,
 ) {
-    fun toSManga() = SManga.create().apply {
-        title = name
-        thumbnail_url = thumbnail
-        url = "manhwa/$slug"
+    fun toSManga(): SManga? {
+        val slug = realId ?: id ?: return null
+        return SManga.create().apply {
+            url = "/manhwa/$slug"
+            title = this@SearchComicDto.title ?: altTitle ?: slug
+            thumbnail_url = thumbnail
+        }
     }
 }
 
 @Serializable
 class ComicDetailsDto(
     @SerialName("_id") val id: String,
-    @SerialName("real_id") val slug: String,
-    @SerialName("name_esp") private val title: String,
-    @SerialName("_sinopsis") private val description: String? = null,
-    @SerialName("_status") private val status: String,
-    @SerialName("_name") private val alternativeName: String? = null,
-    @SerialName("_imagen") private val thumbnail: String,
-    @SerialName("_categoris") private val genres: List<Map<Int, String>>,
-    @SerialName("_extras") private val extras: ComicDetailsExtrasDto,
-    val chapters: List<ChapterDto>,
+    @SerialName("real_id") private val realId: String? = null,
+    @SerialName("name_esp") private val title: String? = null,
+    @SerialName("the_real_name") private val realTitle: String? = null,
+    @SerialName("name_raw") private val rawTitle: String? = null,
+    @SerialName("_name") private val originalTitle: String? = null,
+    @SerialName("others_name") private val otherTitles: List<String> = emptyList(),
+    @SerialName("_sinopsis") private val synopsis: String? = null,
+    @SerialName("_status") private val status: String? = null,
+    @SerialName("_imagen") private val thumbnail: String? = null,
+    @SerialName("_categoris") private val genres: List<Map<String, String>> = emptyList(),
+    @SerialName("autor") private val authors: List<ComicPersonDto> = emptyList(),
+    @SerialName("artista") private val artists: List<ComicPersonDto> = emptyList(),
+    @SerialName("_extras") private val extras: ComicExtrasDto? = null,
+    val chapters: List<ChapterDto> = emptyList(),
 ) {
+    val slug get() = realId ?: id
+
     fun toSManga() = SManga.create().apply {
-        url = "manhwa/$slug"
-        title = this@ComicDetailsDto.title
+        url = "/manhwa/$slug"
+        title = this@ComicDetailsDto.title ?: realTitle ?: slug
         thumbnail_url = thumbnail
-        description = this@ComicDetailsDto.description
-        if (!alternativeName.isNullOrBlank()) {
-            if (!description.isNullOrBlank()) description += "\n\n"
-            description += "Nombres alternativos: $alternativeName"
+        description = buildString {
+            synopsis?.let { append(it) }
+            val alternatives = (otherTitles + listOfNotNull(originalTitle, rawTitle)).distinct()
+            if (alternatives.isNotEmpty()) {
+                if (isNotEmpty()) append("\n\n")
+                append("Nombres alternativos: ")
+                append(alternatives.joinToString())
+            }
+        }.ifBlank { null }
+        status = when {
+            extras?.hiatus == true -> SManga.ON_HIATUS
+            this@ComicDetailsDto.status == "publicandose" -> SManga.ONGOING
+            this@ComicDetailsDto.status == "finalizado" -> SManga.COMPLETED
+            this@ComicDetailsDto.status == "pausado" -> SManga.ON_HIATUS
+            else -> SManga.UNKNOWN
         }
-        status = parseStatus(this@ComicDetailsDto.status)
-        genre = genres.joinToString { it.values.first() }
-        author = extras.authors.joinToString()
+        genre = genres.mapNotNull { it.values.firstOrNull() }.joinToString()
+        author = authors.mapNotNull { it.name }.joinToString()
+            .ifBlank { extras?.authors?.joinToString() }
+        artist = artists.mapNotNull { it.name }.joinToString().ifBlank { null }
         initialized = true
     }
 
-    private fun parseStatus(status: String) = when (status) {
-        "publicandose" -> SManga.ONGOING
-        "finalizado" -> SManga.COMPLETED
-        else -> SManga.UNKNOWN
-    }
+    fun toChapterList(): List<SChapter> = chapters
+        .flatMap { it.toSChapters(id, slug) }
+        .sortedByDescending { it.chapter_number }
 }
 
 @Serializable
-class ComicDetailsExtrasDto(
-    @SerialName("autores") val authors: List<String>,
+class ComicPersonDto(
+    val name: String? = null,
+)
+
+@Serializable
+class ComicExtrasDto(
+    @SerialName("autores") val authors: List<String> = emptyList(),
+    val hiatus: Boolean = false,
 )
 
 @Serializable
 class ChapterDto(
-    @SerialName("chapter") val number: Float,
-    @SerialName("link_raw") val rawUrl: String? = null,
+    @SerialName("chapter") private val number: Float,
+    @SerialName("link_raw") private val rawLink: String? = null,
     private val link: String? = null,
-    private val create: Long?,
-    private val versions: List<ChapterVersionDto>? = null,
+    private val create: Long? = null,
+    private val versions: List<ChapterVersionDto> = emptyList(),
 ) {
-    val espUrl get() = link ?: versions?.firstOrNull()?.link
-    val createdAt get() = create ?: versions?.firstOrNull()?.create
+    fun toSChapters(mangaId: String, mangaSlug: String): List<SChapter> {
+        val name = "Capítulo ${number.toString().removeSuffix(".0")}"
+        return buildList {
+            versions.forEach { add(Triple(it.link, it.scanlator, it.create)) }
+            add(Triple(link, "Esp", create))
+            add(Triple(rawLink, "Raw", create))
+        }.mapNotNull { (link, scanlator, date) ->
+            val chapterId = link
+                ?.takeIf { "manhwaweb.com" in it && "/leer" in it }
+                ?.substringAfterLast("/")
+                ?.replace(mangaId, mangaSlug)
+                ?.takeIf { it.isNotBlank() }
+                ?: return@mapNotNull null
+
+            SChapter.create().apply {
+                url = "/leer/$chapterId"
+                this.name = name
+                chapter_number = number
+                date_upload = date ?: 0L
+                this.scanlator = scanlator
+            }
+        }.distinctBy { it.url }
+    }
 }
 
 @Serializable
 class ChapterVersionDto(
     val link: String? = null,
     val create: Long? = null,
+    private val joint: List<ChapterGroupDto> = emptyList(),
+) {
+    val scanlator get() = joint.mapNotNull { it.name }.joinToString().ifBlank { "ManhwaWeb" }
+}
+
+@Serializable
+class ChapterGroupDto(
+    val name: String? = null,
 )
 
 @Serializable
-class PayloadPageDto(
-    @SerialName("chapter") val data: PageDto,
-)
+class PagesPayloadDto(
+    @SerialName("chapter") private val chapter: PagesChapterDto? = null,
+    @SerialName("real_id") private val realId: String? = null,
+    @SerialName("_id") private val id: String? = null,
+) {
+    val images get() = chapter?.images.orEmpty()
+    val mangaSlug get() = realId ?: id
+}
 
 @Serializable
-class PageDto(
-    @SerialName("img") val images: List<String>,
+class PagesChapterDto(
+    @SerialName("img") val images: List<String> = emptyList(),
 )

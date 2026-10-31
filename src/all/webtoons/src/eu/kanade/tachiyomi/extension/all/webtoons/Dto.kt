@@ -1,6 +1,9 @@
 package eu.kanade.tachiyomi.extension.all.webtoons
 
+import eu.kanade.tachiyomi.source.model.SChapter
 import kotlinx.serialization.Serializable
+import org.jsoup.parser.Parser
+import java.text.DecimalFormat
 
 typealias EpisodeListResponse = ResultDto<EpisodeList>
 
@@ -17,18 +20,38 @@ class EpisodeList(
 @Serializable
 class Episode(
     val episodeTitle: String,
-    val viewerLink: String,
-    val exposureDateMillis: Long,
-    val hasBgm: Boolean = false,
+    private val viewerLink: String,
+    private val exposureDateMillis: Long,
+    private val hasBgm: Boolean = false,
 ) {
     var chapterNumber = -1f
     var seasonNumber = 1
+
+    fun toSChapter(): SChapter = SChapter.create().apply {
+        url = viewerLink
+        name = buildString {
+            append(Parser.unescapeEntities(episodeTitle, false))
+            append(" (ch. ", chapterNumberFormat.format(chapterNumber), ")")
+            if (hasBgm) {
+                append(" ♫")
+            }
+        }
+        date_upload = exposureDateMillis
+        chapter_number = chapterNumber
+    }
 }
+
+// rounds the 0.01 offsets used for bonus episodes as well as trailing zeros
+private val chapterNumberFormat = DecimalFormat("#.##")
 
 @Serializable
 class MotionToonResponse(
-    val assets: MotionToonAssets,
-)
+    private val assets: MotionToonAssets,
+) {
+    fun imageUrls(): List<String> = assets.images.entries
+        .filter { it.key.contains("layer") }
+        .map { it.value }
+}
 
 @Serializable
 class MotionToonAssets(
