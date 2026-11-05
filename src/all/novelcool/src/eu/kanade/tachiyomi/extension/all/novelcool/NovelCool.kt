@@ -7,6 +7,7 @@ import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
+import keiyoushi.network.Fetch
 import keiyoushi.network.get
 import keiyoushi.network.post
 import keiyoushi.network.rateLimit
@@ -44,7 +45,7 @@ abstract class NovelCool : KeiSource() {
             keyword = keyword?.takeUnless { it.isEmpty() },
         )
 
-        val list = client.post(url, payload.toJsonRequestBody()).parseAs<MangaListResponse>().list
+        val list = client.post(url, Fetch.XHR, payload.toJsonRequestBody()).parseAs<MangaListResponse>().list
         val entries = list.filterNot(MangaDto::isTextNovel).map { it.toSManga() }
         return MangasPage(entries, hasNextPage = list.size == PAGE_SIZE)
     }
@@ -72,11 +73,13 @@ abstract class NovelCool : KeiSource() {
 
     private suspend fun fetchBookInfo(bookId: String): BookInfoDto = client.post(
         "$apiUrl/book/info/",
+        Fetch.XHR,
         BookPayload(APP_ID, APP_SECRET, apiLang, bookId).toJsonRequestBody(),
     ).parseAs<BookInfoResponse>().info
 
     private suspend fun fetchChapterList(bookId: String): List<SChapter> = client.post(
         "$apiUrl/chapter/book_list/",
+        Fetch.XHR,
         BookPayload(APP_ID, APP_SECRET, apiLang, bookId).toJsonRequestBody(),
     ).parseAs<ChapterListResponse>().list
         .filter { it.isReadable }
@@ -84,6 +87,7 @@ abstract class NovelCool : KeiSource() {
 
     override suspend fun getPageList(chapter: SChapter): List<Page> = client.post(
         "$apiUrl/chapter/info/",
+        Fetch.XHR,
         ChapterPayload(APP_ID, APP_SECRET, apiLang, chapter.url).toJsonRequestBody(),
     ).parseAs<ChapterInfoResponse>().info.toPageList()
 
@@ -101,8 +105,10 @@ abstract class NovelCool : KeiSource() {
             path.size == 3 && path[0] == "chapter" -> runCatching {
                 chapterInfo(path[2].substringBeforeLast('.')).bookId
             }.getOrNull()
+
             // /novel/<slug>.html - the book id only exists in the page markup
             path.size == 2 && path[0] == "novel" -> fetchBookId(url)
+
             else -> null
         } ?: return null
 
@@ -112,10 +118,11 @@ abstract class NovelCool : KeiSource() {
 
     private suspend fun chapterInfo(chapterId: String): ChapterInfoDto = client.post(
         "$apiUrl/chapter/info/",
+        Fetch.XHR,
         ChapterPayload(APP_ID, APP_SECRET, apiLang, chapterId).toJsonRequestBody(),
     ).parseAs<ChapterInfoResponse>().info
 
-    private suspend fun fetchBookId(url: HttpUrl): String? = client.get(url).asJsoup()
+    private suspend fun fetchBookId(url: HttpUrl): String? = client.get(url, Fetch.DOCUMENT).asJsoup()
         .selectFirst(".book-follow-trigger")
         ?.attr("book_id")
         ?.takeUnless { it.isEmpty() }

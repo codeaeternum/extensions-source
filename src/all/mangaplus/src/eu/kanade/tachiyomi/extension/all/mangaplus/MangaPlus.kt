@@ -7,6 +7,7 @@ import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
+import keiyoushi.network.Fetch
 import keiyoushi.network.get
 import keiyoushi.network.rateLimit
 import keiyoushi.source.KeiSource
@@ -123,7 +124,7 @@ abstract class MangaPlus : KeiSource() {
     }
 
     override suspend fun getPopularManga(page: Int): MangasPage {
-        val result = client.get("$API_URL/title_list/rankingV2?lang=$internalLangName&type=hottest&clang=$internalLangName")
+        val result = client.get("$API_URL/title_list/rankingV2?lang=$internalLangName&type=hottest&clang=$internalLangName", Fetch.XHR)
             .parseAsProto<MangaPlusResponse>()
 
         val titles = result.successOrThrow().titleRankingView!!.rankedTitles
@@ -134,7 +135,7 @@ abstract class MangaPlus : KeiSource() {
     }
 
     override suspend fun getLatestUpdates(page: Int): MangasPage {
-        val result = client.get("$API_URL/web/web_homeV4?lang=$internalLangName&clang=$internalLangName")
+        val result = client.get("$API_URL/web/web_homeV4?lang=$internalLangName&clang=$internalLangName", Fetch.XHR)
             .parseAsProto<MangaPlusResponse>()
 
         val homeView = result.successOrThrow().webHomeView!!
@@ -154,12 +155,12 @@ abstract class MangaPlus : KeiSource() {
 
         // allV2 returns the whole catalog; all_v3 is scoped to the status filter.
         val titles = if (query.isNotEmpty() && genreSlug.isEmpty() && typeFilter.isDefault) {
-            client.get("$API_URL/title_list/allV2").parseAsProto<MangaPlusResponse>()
+            client.get("$API_URL/title_list/allV2", Fetch.XHR).parseAsProto<MangaPlusResponse>()
                 .successOrThrow().allTitlesView!!.allTitlesGroup
                 .flatMap(AllTitlesGroup::titles)
                 .filterByLang()
         } else {
-            client.get(allTitlesV3Url(typeFilter.type)).parseAsProto<MangaPlusResponse>()
+            client.get(allTitlesV3Url(typeFilter.type), Fetch.XHR).parseAsProto<MangaPlusResponse>()
                 .successOrThrow().allTitlesViewV3!!.titles
                 .filter { genreSlug.isEmpty() || it.genres.any { genre -> genre.slug == genreSlug } }
                 .map(AllTitlesV3Entry::title)
@@ -178,7 +179,7 @@ abstract class MangaPlus : KeiSource() {
     override val supportsFilterFetching = true
 
     override suspend fun fetchFilterData(): JsonElement {
-        val result = client.get(allTitlesV3Url(TypeFilter.DEFAULT_TYPE)).parseAsProto<MangaPlusResponse>()
+        val result = client.get(allTitlesV3Url(TypeFilter.DEFAULT_TYPE), Fetch.XHR).parseAsProto<MangaPlusResponse>()
         return result.success?.allTitlesViewV3?.tags.orEmpty().toJsonElement()
     }
 
@@ -229,7 +230,7 @@ abstract class MangaPlus : KeiSource() {
 
     override suspend fun getPageList(chapter: SChapter): List<Page> {
         val chapterId = chapter.url.substringAfterLast("/")
-        val result = client.get(mangaViewerUrl(chapterId)).parseAsProto<MangaPlusResponse>()
+        val result = client.get(mangaViewerUrl(chapterId), Fetch.XHR).parseAsProto<MangaPlusResponse>()
 
         val viewer = result.successOrThrow { popup ->
             when {
@@ -250,14 +251,14 @@ abstract class MangaPlus : KeiSource() {
             }
     }
 
-    override fun imageRequest(page: Page): Request = Request.Builder()
+    override fun getImageRequest(page: Page): Request = Request.Builder()
         .url(page.imageUrl!!)
         .headers(headersBuilder().set("Plus-Vw-Token", page.url).build())
         .get()
         .build()
 
     private suspend fun getTitleDetail(titleId: String): TitleDetailView {
-        val result = client.get("$API_URL/title_detailV3?title_id=$titleId&clang=$internalLangName")
+        val result = client.get("$API_URL/title_detailV3?title_id=$titleId&clang=$internalLangName", Fetch.XHR)
             .parseAsProto<MangaPlusResponse>()
 
         return result.successOrThrow { popup ->
@@ -270,7 +271,7 @@ abstract class MangaPlus : KeiSource() {
     }
 
     private suspend fun titleIdFromChapter(chapterId: String): String? {
-        val result = client.get(mangaViewerUrl(chapterId)).parseAsProto<MangaPlusResponse>()
+        val result = client.get(mangaViewerUrl(chapterId), Fetch.XHR).parseAsProto<MangaPlusResponse>()
         return result.success?.mangaViewer?.titleId?.takeIf { it != 0 }?.toString()
     }
 

@@ -7,6 +7,7 @@ import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
+import keiyoushi.network.Fetch
 import keiyoushi.network.get
 import keiyoushi.network.rateLimit
 import keiyoushi.source.KeiSource
@@ -17,7 +18,6 @@ import okhttp3.Headers
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
-import okhttp3.Request
 import kotlin.time.Duration.Companion.seconds
 import kotlin.time.Instant
 
@@ -43,7 +43,7 @@ abstract class Lectortmoo : KeiSource() {
     }.build()
 
     private suspend fun fetchList(url: HttpUrl): MangasPage {
-        val response = client.get(url).parseAs<MangaListResponse>()
+        val response = client.get(url, Fetch.XHR).parseAs<MangaListResponse>()
         val meta = response.meta
         return MangasPage(
             response.data.map { it.toSManga() },
@@ -63,7 +63,7 @@ abstract class Lectortmoo : KeiSource() {
         fetchDetails: Boolean,
         fetchChapters: Boolean,
     ): SMangaUpdate {
-        val detail = client.get("$apiUrl/mangas/${manga.url}").parseAs<MangaDetailResponse>().data
+        val detail = client.get("$apiUrl/mangas/${manga.url}", Fetch.XHR).parseAs<MangaDetailResponse>().data
         return SMangaUpdate(detail.toSManga(), detail.toChapterList())
     }
 
@@ -94,18 +94,15 @@ abstract class Lectortmoo : KeiSource() {
         }
     }.sortedByDescending { it.chapter_number }
 
-    override suspend fun getPageList(chapter: SChapter): List<Page> = client.get("$apiUrl/chapters/${chapter.url}").parseAs<ChapterPagesResponse>()
+    override suspend fun getPageList(chapter: SChapter): List<Page> = client.get("$apiUrl/chapters/${chapter.url}", Fetch.XHR).parseAs<ChapterPagesResponse>()
         .data.pages.mapIndexed { i, img -> Page(i, imageUrl = img) }
 
     // cdn.lectortmoo.com devuelve 403 a cualquier request con Referer del sitio
-    // (anti-hotlink). La API no lo necesita: se quitan Referer/Origin de todo.
+    // (anti-hotlink). La API no lo necesita: se quitan Referer/Origin de todo y
+    // las imágenes salen tal cual, sin headers de navegador.
     override fun Headers.Builder.configureHeaders() = removeAll("Referer").removeAll("Origin")
 
-    override fun imageRequest(page: Page): Request = Request.Builder()
-        .url(page.imageUrl!!)
-        .headers(headers)
-        .get()
-        .build()
+    override val imageFetch = Fetch.NONE
 
     override fun getMangaUrl(manga: SManga): String = "$baseUrl/manga/${manga.url}"
 
@@ -121,19 +118,19 @@ abstract class Lectortmoo : KeiSource() {
             // so resolve the parent manga via the chapter endpoint instead.
             segments.size == 1 && segments[0].contains("-capitulo-") ->
                 runCatching {
-                    client.get("$apiUrl/chapters/${segments[0]}").parseAs<ChapterPagesResponse>().data.manga?.slug
+                    client.get("$apiUrl/chapters/${segments[0]}", Fetch.XHR).parseAs<ChapterPagesResponse>().data.manga?.slug
                 }.getOrNull()
             else -> return null
         }
 
         return runCatching {
-            client.get("$apiUrl/mangas/$slug").parseAs<MangaDetailResponse>().data.toSManga()
+            client.get("$apiUrl/mangas/$slug", Fetch.XHR).parseAs<MangaDetailResponse>().data.toSManga()
         }.getOrNull()
     }
 
     override val supportsFilterFetching = true
 
-    override suspend fun fetchFilterData(): JsonElement = client.get("$apiUrl/genres").parseAs()
+    override suspend fun fetchFilterData(): JsonElement = client.get("$apiUrl/genres", Fetch.XHR).parseAs()
 
     override fun getFilterList(data: JsonElement?): FilterList {
         val genres = data?.parseAs<List<GenreDto>>().orEmpty()

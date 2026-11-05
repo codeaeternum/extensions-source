@@ -7,6 +7,7 @@ import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
+import keiyoushi.network.Fetch
 import keiyoushi.network.get
 import keiyoushi.network.rateLimit
 import keiyoushi.source.KeiSource
@@ -76,7 +77,7 @@ abstract class Webtoons : KeiSource() {
             else -> throw Exception("page > 4 not available")
         }
 
-        val entries = client.get("$baseUrl/$langCode/ranking/$ranking").asJsoup()
+        val entries = client.get("$baseUrl/$langCode/ranking/$ranking", Fetch.DOCUMENT).asJsoup()
             .select(".webtoon_list li a")
             .map(::mangaFromElement)
 
@@ -112,7 +113,7 @@ abstract class Webtoons : KeiSource() {
         }
 
         // day names stay in English for every language
-        val entries = client.get("$baseUrl/$langCode/originals/$day?sortOrder=UPDATE").asJsoup()
+        val entries = client.get("$baseUrl/$langCode/originals/$day?sortOrder=UPDATE", Fetch.DOCUMENT).asJsoup()
             .select(".webtoon_list li a")
             .map(::mangaFromElement)
 
@@ -138,7 +139,7 @@ abstract class Webtoons : KeiSource() {
             }
         }.build()
 
-        val document = client.get(url).asJsoup()
+        val document = client.get(url, Fetch.DOCUMENT).asJsoup()
         val entries = document.select(".webtoon_list li a").map(::mangaFromElement)
         val hasNextPage = document.selectFirst("a.pagination[aria-current=true] + a") != null
 
@@ -182,7 +183,7 @@ abstract class Webtoons : KeiSource() {
     }
 
     private suspend fun fetchMangaDetails(manga: SManga): SManga {
-        val document = client.get(getMangaUrl(manga)).asJsoup()
+        val document = client.get(getMangaUrl(manga), Fetch.DOCUMENT).asJsoup()
         val detailElement = document.selectFirst(".detail_header .info")
         val infoElement = document.selectFirst("#_asideDetail")
 
@@ -267,7 +268,7 @@ abstract class Webtoons : KeiSource() {
             }
         }.build()
 
-        val episodes = client.get(url, mobileHeaders)
+        val episodes = client.get(url, mobileHeaders, Fetch.XHR)
             .parseAs<EpisodeListResponse>()
             .result
             .episodeList
@@ -317,7 +318,7 @@ abstract class Webtoons : KeiSource() {
     }
 
     override suspend fun getPageList(chapter: SChapter): List<Page> {
-        val document = client.get(getChapterUrl(chapter)).asJsoup()
+        val document = client.get(getChapterUrl(chapter), Fetch.DOCUMENT).asJsoup()
 
         val pages = document.select("div#_imageList > img").mapIndexed { i, element ->
             Page(i, imageUrl = element.attr("data-url"))
@@ -335,7 +336,7 @@ abstract class Webtoons : KeiSource() {
         val docUrl = DOC_URL_REGEX.find(docString)!!.groupValues[1]
         val motionToonPath = MOTION_TOON_PATH_REGEX.find(docString)!!.groupValues[1]
 
-        return client.get(docUrl).parseAs<MotionToonResponse>()
+        return client.get(docUrl, Fetch.XHR).parseAs<MotionToonResponse>()
             .imageUrls()
             .mapIndexed { i, url -> Page(i, imageUrl = motionToonPath + url) }
     }

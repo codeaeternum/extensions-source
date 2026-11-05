@@ -8,6 +8,7 @@ import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
+import keiyoushi.network.Fetch
 import keiyoushi.network.get
 import keiyoushi.network.rateLimit
 import keiyoushi.source.KeiSource
@@ -30,7 +31,7 @@ abstract class LeerCapitulo : KeiSource() {
 
     // The site has no dedicated popular listing; the homepage slider is its "Tendencias" section.
     override suspend fun getPopularManga(page: Int): MangasPage {
-        val mangas = client.get(baseUrl).asJsoup()
+        val mangas = client.get(baseUrl, Fetch.DOCUMENT).asJsoup()
             .select(".lc-slide")
             .map { it.toSManga("a.lc-slide-name") }
 
@@ -38,7 +39,7 @@ abstract class LeerCapitulo : KeiSource() {
     }
 
     override suspend fun getLatestUpdates(page: Int): MangasPage {
-        val mangas = client.get(baseUrl).asJsoup()
+        val mangas = client.get(baseUrl, Fetch.DOCUMENT).asJsoup()
             .select("article.lc-release")
             .map { it.toSManga("a.lc-release-title") }
 
@@ -54,7 +55,7 @@ abstract class LeerCapitulo : KeiSource() {
             if (page > 1) addQueryParameter("page", page.toString())
         }.build()
 
-        val document = client.get(url).asJsoup()
+        val document = client.get(url, Fetch.DOCUMENT).asJsoup()
         val mangas = document.select("article.lc-card").map { it.toSManga("a.lc-card-name") }
 
         return MangasPage(mangas, document.selectFirst("a.page-link[rel=next]") != null)
@@ -81,7 +82,7 @@ abstract class LeerCapitulo : KeiSource() {
             else -> return null
         }
 
-        val response = client.get(baseUrl + mangaPath)
+        val response = client.get(baseUrl + mangaPath, Fetch.DOCUMENT)
         // The site redirects to the canonical slug when it doesn't match the id.
         return response.asJsoup().mangaDetails().apply {
             this.url = response.request.url.encodedPath
@@ -96,7 +97,7 @@ abstract class LeerCapitulo : KeiSource() {
         fetchDetails: Boolean,
         fetchChapters: Boolean,
     ): SMangaUpdate {
-        val document = client.get(baseUrl + manga.url).asJsoup()
+        val document = client.get(baseUrl + manga.url, Fetch.DOCUMENT).asJsoup()
         return SMangaUpdate(document.mangaDetails(), document.chapterList())
     }
 
@@ -147,7 +148,7 @@ abstract class LeerCapitulo : KeiSource() {
         }
     }
 
-    override suspend fun getPageList(chapter: SChapter): List<Page> = client.get(baseUrl + chapter.url).asJsoup()
+    override suspend fun getPageList(chapter: SChapter): List<Page> = client.get(baseUrl + chapter.url, Fetch.DOCUMENT).asJsoup()
         .select("#lcPages img[data-src]")
         .mapIndexed { i, img -> Page(i, imageUrl = img.absUrl("data-src")) }
 

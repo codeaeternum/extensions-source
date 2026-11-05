@@ -11,6 +11,7 @@ import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
+import keiyoushi.network.Fetch
 import keiyoushi.network.get
 import keiyoushi.network.rateLimit
 import keiyoushi.source.KeiSource
@@ -95,7 +96,7 @@ abstract class Rncalation :
             }
             if (page > 1) addQueryParameter("page", page.toString())
         }.build()
-        return parseMangaList(client.get(url).asJsoup())
+        return parseMangaList(client.get(url, Fetch.DOCUMENT).asJsoup())
     }
 
     private suspend fun libraryPage(sort: String, page: Int): MangasPage {
@@ -103,7 +104,7 @@ abstract class Rncalation :
             .addQueryParameter("sort", sort)
             .addQueryParameter("page", page.toString())
             .build()
-        return parseMangaList(client.get(url).asJsoup())
+        return parseMangaList(client.get(url, Fetch.DOCUMENT).asJsoup())
     }
 
     private fun parseMangaList(document: Document): MangasPage {
@@ -139,7 +140,7 @@ abstract class Rncalation :
         val mangaPath = when {
             segments.getOrNull(0) == "comics" -> segments.getOrNull(1)?.let { "/comics/$it" }
             // Reader pages carry a "Volver" backlink to the series ficha.
-            segments.getOrNull(0) == "leer" -> client.get(baseUrl + url.encodedPath).asJsoup()
+            segments.getOrNull(0) == "leer" -> client.get(baseUrl + url.encodedPath, Fetch.DOCUMENT).asJsoup()
                 .selectFirst("a.bar-back-link[href^='/comics/']")
                 ?.attr("href")
             else -> null
@@ -161,7 +162,7 @@ abstract class Rncalation :
         SMangaUpdate(manga = detailsDeferred.await(), chapters = chaptersDeferred.await())
     }
 
-    private suspend fun fetchMangaDetails(manga: SManga): SManga = client.get(baseUrl + manga.url).asJsoup().let { document ->
+    private suspend fun fetchMangaDetails(manga: SManga): SManga = client.get(baseUrl + manga.url, Fetch.DOCUMENT).asJsoup().let { document ->
         manga.apply {
             title = document.selectFirst("h1")!!.text().trim()
             thumbnail_url = document.selectFirst("meta[property=og:image]")?.attr("abs:content")
@@ -185,7 +186,7 @@ abstract class Rncalation :
         val result = mutableListOf<SChapter>()
         var page = 1
         while (true) {
-            val response = client.get("$baseUrl/comics/$slug/chapters?page=$page")
+            val response = client.get("$baseUrl/comics/$slug/chapters?page=$page", Fetch.XHR.from(manga.url))
             val totalPages = response.header("x-pages")?.toIntOrNull() ?: 1
             val batch = response.asJsoup().select("[data-chapter-num]").map { it.toSChapter(manga.url) }
             result += batch
@@ -197,7 +198,7 @@ abstract class Rncalation :
         // (login redirect or login form in the body) means the cookie expired,
         // which is reported instead of silent locks.
         if (sessionCookie() != null && result.any { it.url == manga.url }) {
-            val expired = client.get("$baseUrl/user/profile").use { probe ->
+            val expired = client.get("$baseUrl/user/profile", Fetch.DOCUMENT).use { probe ->
                 probe.request.url.encodedPath.startsWith("/auth/login") ||
                     probe.asJsoup().selectFirst("form[action*='login'], a[href^='/auth/login']") != null
             }
@@ -233,7 +234,7 @@ abstract class Rncalation :
         }
     }
 
-    override suspend fun getPageList(chapter: SChapter): List<Page> = client.get(baseUrl + chapter.url).asJsoup()
+    override suspend fun getPageList(chapter: SChapter): List<Page> = client.get(baseUrl + chapter.url, Fetch.DOCUMENT).asJsoup()
         .select("img.page-img")
         .mapIndexed { i, img ->
             // First ~2 pages are eager (src), the rest lazy (data-src).

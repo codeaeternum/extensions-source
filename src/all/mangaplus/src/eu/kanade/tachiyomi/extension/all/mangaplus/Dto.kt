@@ -141,7 +141,9 @@ class TitleDetailView(
             genreList.any { it.slug == "one-shot" } ||
                 COMPLETED_REGEX.containsMatchIn(nonAppearanceInfo) ||
                 viewingPeriodDescription.contains("latest 0 chapters") -> SManga.COMPLETED
+
             HIATUS_REGEX.containsMatchIn(nonAppearanceInfo) -> SManga.ON_HIATUS
+
             else -> SManga.ONGOING
         }
     }

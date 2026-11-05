@@ -9,6 +9,7 @@ import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import eu.kanade.tachiyomi.source.model.UpdateStrategy
 import keiyoushi.annotation.Source
+import keiyoushi.network.Fetch
 import keiyoushi.network.get
 import keiyoushi.network.rateLimit
 import keiyoushi.source.KeiSource
@@ -45,7 +46,7 @@ abstract class HentaiMode : KeiSource() {
         }
     }
 
-    private suspend fun fetchMangas(url: String): List<SManga> = client.get(url, ensureSuccess = false).use { response ->
+    private suspend fun fetchMangas(url: String): List<SManga> = client.get(url, Fetch.DOCUMENT, ensureSuccess = false).use { response ->
         if (!response.isSuccessful) emptyList() else parseEntries(response.asJsoup())
     }
 
@@ -84,7 +85,7 @@ abstract class HentaiMode : KeiSource() {
     // Resolves a free-text query against a /lista/<index> name index and fetches
     // the matched entity listing (e.g. /lista/etiquetas -> /etiqueta/42).
     private suspend fun entityMangas(index: String, prefix: String, query: String): List<SManga> {
-        val links = client.get("$baseUrl/lista/$index", ensureSuccess = false).use { res ->
+        val links = client.get("$baseUrl/lista/$index", Fetch.DOCUMENT, ensureSuccess = false).use { res ->
             if (res.isSuccessful) res.asJsoup().select("a[href^=/$prefix/]") else null
         } ?: return emptyList()
 
@@ -124,7 +125,7 @@ abstract class HentaiMode : KeiSource() {
         fetchChapters: Boolean,
     ): SMangaUpdate {
         val updated = if (fetchDetails) {
-            parseDetails(client.get(getMangaUrl(manga)).asJsoup()).apply {
+            parseDetails(client.get(getMangaUrl(manga), Fetch.DOCUMENT).asJsoup()).apply {
                 url = manga.url
             }
         } else {
@@ -172,7 +173,7 @@ abstract class HentaiMode : KeiSource() {
     // =============================== Pages ================================
 
     override suspend fun getPageList(chapter: SChapter): List<Page> {
-        val document = client.get(getChapterUrl(chapter)).asJsoup()
+        val document = client.get(getChapterUrl(chapter), Fetch.DOCUMENT).asJsoup()
         val script = document.selectFirst("script:containsData(page_image)")?.data()
             ?: return emptyList()
 
@@ -194,7 +195,7 @@ abstract class HentaiMode : KeiSource() {
         } ?: return null
 
         return runCatching {
-            val document = client.get("$baseUrl/g/$id").asJsoup()
+            val document = client.get("$baseUrl/g/$id", Fetch.DOCUMENT).asJsoup()
             parseDetails(document).apply {
                 setUrlWithoutDomain(document.location())
             }

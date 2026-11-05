@@ -8,6 +8,7 @@ import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
+import keiyoushi.network.Fetch
 import keiyoushi.network.get
 import keiyoushi.network.rateLimit
 import keiyoushi.source.KeiSource
@@ -27,12 +28,12 @@ abstract class ManhwaWeb : KeiSource() {
     override fun OkHttpClient.Builder.configureClient() = rateLimit(2, 1.seconds)
 
     override suspend fun getPopularManga(page: Int): MangasPage {
-        val result = client.get("$apiUrl/manhwa/nuevos").parseAs<PopularPayloadDto>()
+        val result = client.get("$apiUrl/manhwa/nuevos", Fetch.XHR).parseAs<PopularPayloadDto>()
         return MangasPage(result.toSMangaList(), hasNextPage = false)
     }
 
     override suspend fun getLatestUpdates(page: Int): MangasPage {
-        val result = client.get("$apiUrl/latest/new-manhwa").parseAs<LatestPayloadDto>()
+        val result = client.get("$apiUrl/latest/new-manhwa", Fetch.XHR).parseAs<LatestPayloadDto>()
         return MangasPage(result.toSMangaList(), hasNextPage = false)
     }
 
@@ -44,7 +45,7 @@ abstract class ManhwaWeb : KeiSource() {
             "manhwa", "manga" -> segments[1]
             // Reader URLs carry the chapter id; the chapter payload holds the
             // manga's slug.
-            "leer" -> client.get("$apiUrl/chapters/see/${segments[1]}")
+            "leer" -> client.get("$apiUrl/chapters/see/${segments[1]}", Fetch.XHR)
                 .parseAs<PagesPayloadDto>().mangaSlug
             else -> null
         } ?: return null
@@ -76,7 +77,7 @@ abstract class ManhwaWeb : KeiSource() {
             }
         }
 
-        val result = client.get(url.addQueryParameter("page", (page - 1).toString()).build())
+        val result = client.get(url.addQueryParameter("page", (page - 1).toString()).build(), Fetch.XHR)
             .parseAs<LibraryPayloadDto>()
 
         return MangasPage(result.toSMangaList(), result.hasNextPage)
@@ -96,7 +97,7 @@ abstract class ManhwaWeb : KeiSource() {
     }
 
     override suspend fun getPageList(chapter: SChapter): List<Page> {
-        val result = client.get("$apiUrl/chapters/see/${chapter.url.substringAfterLast("/")}")
+        val result = client.get("$apiUrl/chapters/see/${chapter.url.substringAfterLast("/")}", Fetch.XHR)
             .parseAs<PagesPayloadDto>()
 
         return result.images
@@ -106,9 +107,9 @@ abstract class ManhwaWeb : KeiSource() {
 
     // imgNmw.xyz hosts reject image requests without the site's Referer, while
     // the site marks every other image host as no-referrer.
-    override fun imageRequest(page: Page): Request {
+    override fun getImageRequest(page: Page): Request {
         val url = page.imageUrl!!.toHttpUrl()
-        if (url.host.endsWith("mw.xyz")) return super.imageRequest(page)
+        if (url.host.endsWith("mw.xyz")) return super.getImageRequest(page)
 
         return Request.Builder()
             .url(url)
@@ -117,7 +118,7 @@ abstract class ManhwaWeb : KeiSource() {
             .build()
     }
 
-    private suspend fun getDetailsBySlug(slug: String) = client.get("$apiUrl/manhwa/see/$slug").parseAs<ComicDetailsDto>()
+    private suspend fun getDetailsBySlug(slug: String) = client.get("$apiUrl/manhwa/see/$slug", Fetch.XHR).parseAs<ComicDetailsDto>()
 
     override fun getFilterList(data: JsonElement?): FilterList = FilterList(
         TypeFilter(),

@@ -8,6 +8,7 @@ import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
+import keiyoushi.network.Fetch
 import keiyoushi.network.get
 import keiyoushi.network.rateLimit
 import keiyoushi.source.KeiSource
@@ -63,15 +64,15 @@ abstract class IkigaiMangas : KeiSource() {
             domainDiscovered = false
 
             runCatching {
-                val landing = client.get(LANDING_URL, headers).asJsoup()
+                val landing = client.get(LANDING_URL, headers, Fetch.DOCUMENT).asJsoup()
                 val scriptName = landing.selectFirst("""button[on:click]:containsOwn(Ir al sitio)""")
                     ?.attr("on:click")
                     ?.substringBefore('#')
                     ?: error("landing JS chunk not found")
-                val redirector = client.get("$LANDING_URL/build/$scriptName", headers).use { response ->
+                val redirector = client.get("$LANDING_URL/build/$scriptName", headers, Fetch.SCRIPT).use { response ->
                     DOMAIN_REGEX.find(response.body.string())?.groupValues?.get(1)
                 } ?: error("redirector domain not found in $scriptName")
-                client.get(redirector, headers).use { response ->
+                client.get(redirector, headers, Fetch.DOCUMENT).use { response ->
                     activeBaseUrl = "https://${response.request.url.host}"
                 }
                 domainDiscovered = true
@@ -84,10 +85,10 @@ abstract class IkigaiMangas : KeiSource() {
     private suspend fun fetchDocument(url: HttpUrl): Document {
         discoverActiveDomain()
         return try {
-            client.get(url.onActiveDomain(), siteHeaders()).asJsoup()
+            client.get(url.onActiveDomain(), siteHeaders(), Fetch.DOCUMENT).asJsoup()
         } catch (e: Exception) {
             discoverActiveDomain(force = true)
-            client.get(url.onActiveDomain(), siteHeaders()).asJsoup()
+            client.get(url.onActiveDomain(), siteHeaders(), Fetch.DOCUMENT).asJsoup()
         }
     }
 
@@ -294,7 +295,7 @@ abstract class IkigaiMangas : KeiSource() {
         return pages.mapIndexed { index, url -> Page(index, imageUrl = url) }
     }
 
-    override fun imageRequest(page: Page): Request = super.imageRequest(page).newBuilder()
+    override fun getImageRequest(page: Page): Request = super.getImageRequest(page).newBuilder()
         .header("Referer", "$activeBaseUrl/")
         .header("Origin", activeBaseUrl)
         .header("Sec-Fetch-Dest", "image")
